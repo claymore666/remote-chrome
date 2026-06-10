@@ -1,10 +1,10 @@
 import { build } from "esbuild";
 
 // Production: __TEST_CONFIG__ is null. The UAT harness sets
-// BROWSERD_TEST_CONFIG to a JSON object {port, token, profile} to build a
+// REMOTE_CHROME_TEST_CONFIG to a JSON object {port, token, profile} to build a
 // self-configuring test extension. Never ship a build made with it set.
-const testConfig = process.env.BROWSERD_TEST_CONFIG || "null";
-const outdir = process.env.BROWSERD_EXT_OUTDIR || "dist";
+const testConfig = process.env.REMOTE_CHROME_TEST_CONFIG || "null";
+const outdir = process.env.REMOTE_CHROME_EXT_OUTDIR || "dist";
 
 await build({
   entryPoints: ["src/background.ts", "src/options.ts"],

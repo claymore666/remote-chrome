@@ -1,4 +1,4 @@
-/* __browserd_extract__ — readability-lite article extraction.
+/* __remote-chrome_extract__ — readability-lite article extraction.
  *
  * Runs in the page via Runtime.evaluate (returnByValue). Finds the main
  * content container readability-style (score the parents of substantial

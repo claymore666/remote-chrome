@@ -1,4 +1,4 @@
-// Package bridge hosts the localhost WebSocket endpoint that browserd's
+// Package bridge hosts the localhost WebSocket endpoint that remote-chrome's
 // Chrome extension instances connect to, and relays commands/events.
 //
 // Wire protocol — must stay in sync with extension/src/protocol.ts.

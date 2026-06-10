@@ -3,7 +3,7 @@
 build: build-go build-ext
 
 build-go:
-	go build -o bin/browserd ./cmd/browserd
+	go build -o bin/remote-chrome ./cmd/remote-chrome
 
 build-ext:
 	cd extension && npm install --no-audit --no-fund && npm run build
@@ -19,7 +19,7 @@ test-uat:
 
 # One-time: fetch Chrome for Testing for the UAT suite.
 uat-chrome:
-	npx -y @puppeteer/browsers install chrome@stable --path ~/.cache/browserd-uat
+	npx -y @puppeteer/browsers install chrome@stable --path ~/.cache/remote-chrome-uat
 
 lint:
 	gofmt -l . && test -z "$$(gofmt -l .)"

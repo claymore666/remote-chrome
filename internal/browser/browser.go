@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"browserd/internal/bridge"
+	"remote-chrome/internal/bridge"
 )
 
 const (
@@ -43,7 +43,7 @@ type Manager struct {
 	tabs map[tabKey]*Tab
 }
 
-// Tab holds browserd's view of one browser tab.
+// Tab holds remote-chrome's view of one browser tab.
 type Tab struct {
 	Profile string
 	ID      int

@@ -12,10 +12,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"browserd/internal/audit"
-	"browserd/internal/browser"
-	"browserd/internal/config"
-	"browserd/internal/perms"
+	"remote-chrome/internal/audit"
+	"remote-chrome/internal/browser"
+	"remote-chrome/internal/config"
+	"remote-chrome/internal/perms"
 )
 
 // fakeBrowser implements browser.Caller + Bridger: a minimal simulated
@@ -71,7 +71,7 @@ func (f *fakeBrowser) CDP(ctx context.Context, profile string, tabID int, method
 		}
 		raw, _ := json.Marshal(params)
 		json.Unmarshal(raw, &p)
-		if strings.Contains(p.Expression, "__browserd_extract__") {
+		if strings.Contains(p.Expression, "__remote-chrome_extract__") {
 			f.mu.Lock()
 			isArticle := f.articleMode
 			f.mu.Unlock()

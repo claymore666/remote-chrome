@@ -1,5 +1,5 @@
 {
-  "name": "browserd-bridge",
+  "name": "remote-chrome-bridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",

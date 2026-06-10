@@ -1,4 +1,4 @@
-# browserd — Browser Control MCP Server
+# remote-chrome — Browser Control MCP Server
 
 Go MCP server + Chrome MV3 extension that lets Claude act in the user's *real*
 Chrome profiles, with every consequential action gated by server-enforced
@@ -7,7 +7,7 @@ approvals. Full design: `PLAN.md`. Running decisions/deviations: `NOTES.md`.
 ## Architecture (one screen)
 
 ```
-Claude (MCP client) ── stdio JSON-RPC ──> cmd/browserd (Go)
+Claude (MCP client) ── stdio JSON-RPC ──> cmd/remote-chrome (Go)
                                             │  internal/server   MCP tools + permission gating
                                             │  internal/perms    (action group × eTLD+1) grant matrix
                                             │  internal/approval elicitation / zenity / PowerShell dialogs
@@ -26,7 +26,7 @@ Claude (MCP client) ── stdio JSON-RPC ──> cmd/browserd (Go)
 ## Build & test
 
 ```sh
-make build        # Go binary -> bin/browserd, extension -> extension/dist/
+make build        # Go binary -> bin/remote-chrome, extension -> extension/dist/
 make test         # all Go unit + module tests, no Chrome (go test ./internal/...)
 make uat-chrome   # one-time: fetch Chrome for Testing for the UAT suite
 make test-uat     # end-to-end against real headless Chrome (go test -tags uat ./test/uat)
@@ -53,7 +53,7 @@ make lint         # gofmt + go vet (incl. -tags uat) + tsc --noEmit
 4. WebSocket listener binds `127.0.0.1` only; token compared constant-time;
    `Origin` must be `chrome-extension://`; max message size enforced.
 5. Every navigation, interaction, approval decision and profile target is
-   appended to the audit log (`~/.browserd/audit.jsonl`).
+   appended to the audit log (`~/.remote-chrome/audit.jsonl`).
 6. uids returned by `snapshot()` are per-tab, per-generation; interaction with
    a stale uid must error with "take a new snapshot", never guess.
 
@@ -64,7 +64,7 @@ make lint         # gofmt + go vet (incl. -tags uat) + tsc --noEmit
   request_permission").
 - Logging: `slog` to stderr (stdout is the MCP transport — never print to it).
   `--verbose` dumps every relayed CDP command/response.
-- Config/state dir: `~/.browserd` (Linux) / `%LOCALAPPDATA%\browserd` (Win).
+- Config/state dir: `~/.remote-chrome` (Linux) / `%LOCALAPPDATA%\remote-chrome` (Win).
 - Tests live next to their packages (module tests with fake extension/CDP
   included; `internal/server/server_test.go` is the gating spec);
   UAT/regression in `test/uat` behind the `uat` build tag.

@@ -39,7 +39,7 @@ Newest entries at the bottom of each section.
 - [x] internal/approval — elicitation + zenity/PowerShell fallback + Confirm
 - [x] internal/browser — manager, events, snapshot/uids, actions, page ops
 - [x] internal/server — 32 tools registered + gating (server_test.go is the spec)
-- [x] cmd/browserd — main, setup subcommand, signal kill switch
+- [x] cmd/remote-chrome — main, setup subcommand, signal kill switch
 - [x] Unit tests (perms, config, audit, approval, snapshot render)
 - [x] Module tests (bridge w/ fake extension over real WS; manager w/ fake CDP; server gating w/ in-memory MCP client + scripted elicitation)
 - [x] UAT/regression: real extension in real headless Chrome (test/uat, 15 subtests + binary setup test)
@@ -78,7 +78,7 @@ server.Run(ctx, &mcp.StdioTransport{})
 
 - **Google-branded Chrome ignores `--load-extension` since 137.** The UAT
   suite therefore uses Chrome for Testing (`make uat-chrome`, cached under
-  `~/.cache/browserd-uat`). Manual sideloading via chrome://extensions in the
+  `~/.cache/remote-chrome-uat`). Manual sideloading via chrome://extensions in the
   real browser is unaffected.
 - **`Page.navigateToHistoryEntry` returns before the navigation commits** —
   and the OLD page still reports `readyState === "complete"`, so a naive

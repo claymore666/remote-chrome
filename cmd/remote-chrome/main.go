@@ -1,10 +1,10 @@
-// browserd — Browser Control MCP server (see PLAN.md).
+// remote-chrome — Browser Control MCP server (see PLAN.md).
 //
 // Usage:
 //
-//	browserd                 run the MCP server on stdio (for Claude Desktop/Code)
-//	browserd setup           print port/token + extension install instructions
-//	browserd --verbose       additionally dump every relayed CDP command
+//	remote-chrome                 run the MCP server on stdio (for Claude Desktop/Code)
+//	remote-chrome setup           print port/token + extension install instructions
+//	remote-chrome --verbose       additionally dump every relayed CDP command
 package main
 
 import (
@@ -17,11 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"browserd/internal/audit"
-	"browserd/internal/bridge"
-	"browserd/internal/browser"
-	"browserd/internal/config"
-	"browserd/internal/server"
+	"remote-chrome/internal/audit"
+	"remote-chrome/internal/bridge"
+	"remote-chrome/internal/browser"
+	"remote-chrome/internal/config"
+	"remote-chrome/internal/server"
 )
 
 func main() {
@@ -71,7 +71,7 @@ func run(log *slog.Logger, verbose bool, subcommand string) error {
 		return printSetup(cfg, dir)
 	}
 	if subcommand != "" {
-		return fmt.Errorf("unknown subcommand %q (try: browserd setup)", subcommand)
+		return fmt.Errorf("unknown subcommand %q (try: remote-chrome setup)", subcommand)
 	}
 
 	aud, err := audit.Open(dir)
@@ -91,7 +91,7 @@ func run(log *slog.Logger, verbose bool, subcommand string) error {
 	})
 
 	if _, err := br.Start(cfg.Port); err != nil {
-		return fmt.Errorf("%w — is another browserd running?", err)
+		return fmt.Errorf("%w — is another remote-chrome running?", err)
 	}
 	defer br.Close()
 	log.Info("bridge listening", "addr", fmt.Sprintf("127.0.0.1:%d", cfg.Port), "stateDir", dir)
@@ -117,7 +117,7 @@ func run(log *slog.Logger, verbose bool, subcommand string) error {
 }
 
 func printSetup(cfg *config.Config, dir string) error {
-	fmt.Printf(`browserd setup
+	fmt.Printf(`remote-chrome setup
 ==============
 
 State dir : %s
@@ -128,12 +128,12 @@ Token     : %s
 2. In each Chrome profile you want Claude to reach:
      chrome://extensions -> enable "Developer mode" -> "Load unpacked"
      -> select the extension folder.
-3. Click "Details" -> "Extension options" on the browserd bridge extension:
+3. Click "Details" -> "Extension options" on the remote-chrome bridge extension:
      - port  : %d
      - token : (paste the token above)
      - label : a name for this profile (personal, work, …)
-4. Add browserd to your MCP client, e.g. Claude Code:
-     claude mcp add browserd -- %s
+4. Add remote-chrome to your MCP client, e.g. Claude Code:
+     claude mcp add remote-chrome -- %s
 5. Optional: pin the extension origin. After the first connection the
    extension id appears in the server log; add it to %s:
      pinned_origins = ["chrome-extension://<id>"]
@@ -146,7 +146,7 @@ The toolbar icon is the kill switch: one click severs the connection.
 func executablePath() string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "browserd"
+		return "remote-chrome"
 	}
 	return exe
 }

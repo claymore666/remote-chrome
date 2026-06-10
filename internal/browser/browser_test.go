@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"browserd/internal/bridge"
+	"remote-chrome/internal/bridge"
 )
 
 // fakeCaller simulates the extension side: programmable per-CDP-method

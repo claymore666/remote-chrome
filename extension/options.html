@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>browserd bridge — options</title>
+  <title>remote-chrome bridge — options</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; }
     label { display: block; margin-top: 1rem; font-weight: 600; }
@@ -13,15 +13,15 @@
   </style>
 </head>
 <body>
-  <h2>browserd bridge</h2>
-  <p class="hint">Values come from the browserd server: run <code>browserd setup</code> to print port and token.</p>
+  <h2>remote-chrome bridge</h2>
+  <p class="hint">Values come from the remote-chrome server: run <code>remote-chrome setup</code> to print port and token.</p>
 
   <label>Server port
     <input id="port" type="number" min="1" max="65535" placeholder="e.g. 49152">
   </label>
 
   <label>Token
-    <input id="token" type="password" placeholder="paste the token from browserd setup">
+    <input id="token" type="password" placeholder="paste the token from remote-chrome setup">
   </label>
 
   <label>Profile label

@@ -1,4 +1,4 @@
-# browserd — Browser Control MCP Server
+# remote-chrome — Browser Control MCP Server
 
 Claude acts **in your regular Chrome, with your own profiles** — and every
 consequential action is gated by an approval dialog that only *you* can
@@ -8,7 +8,7 @@ rights, no separate browser, no cookie/password access, full audit trail.
 Design rationale: [PLAN.md](PLAN.md). Dev log: [NOTES.md](NOTES.md).
 
 ```
-Claude ── MCP (stdio) ──> browserd (Go) ── WebSocket 127.0.0.1 ──> Chrome extension ── chrome.debugger ──> your tabs
+Claude ── MCP (stdio) ──> remote-chrome (Go) ── WebSocket 127.0.0.1 ──> Chrome extension ── chrome.debugger ──> your tabs
                           guardrails, approvals, audit                 dumb relay, kill switch
 ```
 
@@ -41,18 +41,18 @@ clicking the extension's toolbar icon) severs everything instantly.
 ### 1. Build
 
 ```sh
-make build        # -> bin/browserd, extension/dist/
+make build        # -> bin/remote-chrome, extension/dist/
 ```
 
 ### 2. Server first run
 
 ```sh
-bin/browserd setup
+bin/remote-chrome setup
 ```
 
 Prints the state dir, the WebSocket port and the auth token, plus these
-steps. Config lives in `~/.browserd/config.toml` (Linux) or
-`%LOCALAPPDATA%\browserd\config.toml` (Windows), created with a fresh
+steps. Config lives in `~/.remote-chrome/config.toml` (Linux) or
+`%LOCALAPPDATA%\remote-chrome\config.toml` (Windows), created with a fresh
 256-bit token on first run.
 
 ### 3. Extension (per Chrome profile you want Claude to reach)
@@ -60,7 +60,7 @@ steps. Config lives in `~/.browserd/config.toml` (Linux) or
 1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
    select the `extension/` folder.
 2. Extension **Details → Extension options**: enter the port + token from
-   `browserd setup`, and a profile label (`personal`, `work`, …).
+   `remote-chrome setup`, and a profile label (`personal`, `work`, …).
 3. Optional hardening: after the first connection the server log shows the
    extension's origin; pin it in config.toml:
    `pinned_origins = ["chrome-extension://<id>"]`.
@@ -71,7 +71,7 @@ one click detaches everything and stops reconnecting; click again to re-arm.
 ### 4. Register with your MCP client
 
 ```sh
-claude mcp add browserd -- /path/to/bin/browserd
+claude mcp add remote-chrome -- /path/to/bin/remote-chrome
 ```
 
 (or the equivalent connector entry in Claude Desktop. Clients without
@@ -109,7 +109,7 @@ approval = "auto"             # auto | elicit | dialog
 permission_set = "default"    # where "save to set" approvals are stored
 ```
 
-Audit log: `~/.browserd/audit.jsonl` — every navigation, interaction,
+Audit log: `~/.remote-chrome/audit.jsonl` — every navigation, interaction,
 approval decision, grant and profile target, one JSON object per line.
 
 ## Development
@@ -119,7 +119,7 @@ make test       # unit + module tests (no Chrome)
 make uat-chrome # once: fetch Chrome for Testing
 make test-uat   # end-to-end: real extension in real headless Chrome
 make lint       # gofmt, go vet, tsc --noEmit
-bin/browserd --verbose   # dumps every relayed CDP command to stderr
+bin/remote-chrome --verbose   # dumps every relayed CDP command to stderr
 ```
 
 The UAT suite builds a self-configuring extension variant

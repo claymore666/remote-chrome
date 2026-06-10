@@ -1,4 +1,4 @@
-// Package config owns browserd's on-disk state directory and TOML config.
+// Package config owns remote-chrome's on-disk state directory and TOML config.
 package config
 
 import (
@@ -39,10 +39,10 @@ func defaults() *Config {
 	return &Config{Approval: "auto", PermissionSet: "default"}
 }
 
-// Dir returns the state directory (~/.browserd or %LOCALAPPDATA%\browserd),
-// honoring BROWSERD_DIR for tests.
+// Dir returns the state directory (~/.remote-chrome or %LOCALAPPDATA%\remote-chrome),
+// honoring REMOTE_CHROME_DIR for tests.
 func Dir() (string, error) {
-	if d := os.Getenv("BROWSERD_DIR"); d != "" {
+	if d := os.Getenv("REMOTE_CHROME_DIR"); d != "" {
 		return d, nil
 	}
 	if runtime.GOOS == "windows" {
@@ -50,13 +50,13 @@ func Dir() (string, error) {
 		if base == "" {
 			return "", fmt.Errorf("%%LOCALAPPDATA%% not set")
 		}
-		return filepath.Join(base, "browserd"), nil
+		return filepath.Join(base, "remote-chrome"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".browserd"), nil
+	return filepath.Join(home, ".remote-chrome"), nil
 }
 
 func Path() (string, error) {

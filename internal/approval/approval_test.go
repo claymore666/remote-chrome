@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"browserd/internal/perms"
+	"remote-chrome/internal/perms"
 )
 
 func TestMessage(t *testing.T) {

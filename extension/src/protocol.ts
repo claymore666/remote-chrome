@@ -1,4 +1,4 @@
-// Wire protocol between the browserd Go server and this extension.
+// Wire protocol between the remote-chrome Go server and this extension.
 // Must stay in sync with internal/bridge/protocol.go (PROTOCOL_VERSION).
 
 export const PROTOCOL_VERSION = 1;

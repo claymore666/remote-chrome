@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"browserd/internal/perms"
+	"remote-chrome/internal/perms"
 )
 
 type Decision string
@@ -97,7 +97,7 @@ func Confirm(ctx context.Context, message string) (bool, error) {
 	defer cancel()
 	if runtime.GOOS == "windows" {
 		script := fmt.Sprintf(`Add-Type -AssemblyName PresentationFramework;`+
-			`$r=[System.Windows.MessageBox]::Show(%q,'browserd','YesNo','Warning');Write-Output $r`, message)
+			`$r=[System.Windows.MessageBox]::Show(%q,'remote-chrome','YesNo','Warning');Write-Output $r`, message)
 		out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
 		if err != nil {
 			return false, nil
@@ -107,7 +107,7 @@ func Confirm(ctx context.Context, message string) (bool, error) {
 	if _, err := exec.LookPath("zenity"); err != nil {
 		return false, fmt.Errorf("zenity not found — install it or use an MCP client with elicitation support")
 	}
-	err := exec.CommandContext(ctx, "zenity", "--question", "--title", "browserd", "--text", message).Run()
+	err := exec.CommandContext(ctx, "zenity", "--question", "--title", "remote-chrome", "--text", message).Run()
 	return err == nil, nil
 }
 
@@ -118,7 +118,7 @@ func askZenity(ctx context.Context, req Request) (Decision, error) {
 	def := req.DefaultDecision()
 	args := []string{
 		"--list", "--radiolist",
-		"--title", "browserd permission request",
+		"--title", "remote-chrome permission request",
 		"--text", req.Message(),
 		"--column", "", "--column", "decision",
 		"--height", "320",
@@ -146,7 +146,7 @@ func askPowershell(ctx context.Context, req Request) (Decision, error) {
 	// Three-way message box: Yes = default granularity, No = once, Cancel = deny.
 	def := req.DefaultDecision()
 	script := fmt.Sprintf(`Add-Type -AssemblyName PresentationFramework;`+
-		`$r=[System.Windows.MessageBox]::Show(%q,'browserd permission request','YesNoCancel','Warning');`+
+		`$r=[System.Windows.MessageBox]::Show(%q,'remote-chrome permission request','YesNoCancel','Warning');`+
 		`Write-Output $r`,
 		req.Message()+fmt.Sprintf("\n\nYes = %s   No = once   Cancel = deny", def))
 	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()

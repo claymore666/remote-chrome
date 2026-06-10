@@ -10,9 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"browserd/internal/approval"
-	"browserd/internal/audit"
-	"browserd/internal/perms"
+	"remote-chrome/internal/approval"
+	"remote-chrome/internal/audit"
+	"remote-chrome/internal/perms"
 )
 
 // text wraps a string as a tool result.

@@ -1,4 +1,4 @@
-module browserd
+module remote-chrome
 
 go 1.25.0
 

@@ -24,13 +24,13 @@ Consequences:
 ```
 ┌─────────────┐  stdio (MCP)   ┌──────────────────┐  WebSocket (127.0.0.1, token)  ┌─────────────────────────┐
 │   Claude    │ <────────────> │  Go MCP server   │ <────────────────────────────> │ Chrome extension (MV3)  │
-│  Desktop /  │   JSON-RPC     │   "browserd"     │      one conn per profile      │  service worker, per    │
+│  Desktop /  │   JSON-RPC     │   "remote-chrome"     │      one conn per profile      │  service worker, per    │
 │  Code       │                │  guardrails,     │                                │  profile; chrome.debugger│
 └─────────────┘                │  audit, relay    │                                │  + chrome.tabs           │
                                └──────────────────┘                                └─────────────────────────┘
 ```
 
-- **Go server** (`browserd`): MCP stdio server (official `modelcontextprotocol/go-sdk`). Hosts a WebSocket listener on `127.0.0.1:<random port>`. All guardrails, the audit log, and elicitation live here — the extension is a dumb, trusted relay.
+- **Go server** (`remote-chrome`): MCP stdio server (official `modelcontextprotocol/go-sdk`). Hosts a WebSocket listener on `127.0.0.1:<random port>`. All guardrails, the audit log, and elicitation live here — the extension is a dumb, trusted relay.
 - **Extension** (MV3, sideloaded unpacked — no store account, no admin rights): service worker holds the WebSocket; relays CDP commands to `chrome.debugger.sendCommand` and tab operations to `chrome.tabs`. Permissions kept minimal: `debugger`, `tabs`, `storage`.
 - **Wire protocol:** mostly a thin tunnel — `{id, tabId, method: "Page.navigate", params: {...}}` → `chrome.debugger.sendCommand`. The Go side can reuse `cdproto` types for marshaling without needing chromedp's transport. A few non-CDP ops (`list_tabs`, `create_tab`, `capture_visible_tab`) map to `chrome.tabs` calls.
 - **Extension ↔ server auth:** the server generates a token on first run; you paste it into the extension options once per profile. Server additionally rejects connections whose `Origin` is not the extension's `chrome-extension://<id>`. This stops other local processes or web pages from speaking to the control port.
@@ -62,7 +62,7 @@ Examples: `interact × linkedin.com`, `read × *` (reads anywhere). Nothing is p
 
 **Grant flow.** When a tool call has no matching grant, the server raises one elicitation — *"Allow `interact` on `instagram.com`? — reason: post your summary"* — with response options **once** / **this session** / **save to project set** / **deny**. Claude can also request proactively via `request_permission(actions[], domain, reason)` to batch what a task will need into a single dialog (e.g. `read`+`navigate`+`interact` on linkedin.com). Denials are returned to Claude as structured errors so it can adapt or ask you in chat.
 
-**Scoping unit: the chat / Cowork session.** Grants are keyed to the MCP connection; disconnect or `reset_permissions()` clears them. For recurring work, **named project sets** (`save_permission_set(name)` / `load_permission_set(name)`, stored under `~/.browserd/permission-sets/`) re-arm a whole matrix in one approval at session start — a Cowork project can reference its set in the connector config.
+**Scoping unit: the chat / Cowork session.** Grants are keyed to the MCP connection; disconnect or `reset_permissions()` clears them. For recurring work, **named project sets** (`save_permission_set(name)` / `load_permission_set(name)`, stored under `~/.remote-chrome/permission-sets/`) re-arm a whole matrix in one approval at session start — a Cowork project can reference its set in the connector config.
 
 **Inspection:** `list_permissions()` (free) shows the live matrix; `remove_permission(action, domain)` is free — shrinking access is always safe.
 
@@ -80,7 +80,7 @@ This covers the headline use case — "summarize X and post it on my LinkedIn / 
 
 **Additional rails:**
 - **Domain policy:** allow/deny navigation lists, separate from the interaction trust list. Default: navigation broadly allowed minus a deny list; interaction trust is opt-in per domain.
-- **Audit log** (`~/.browserd/audit.jsonl` / `%LOCALAPPDATA%\browserd\audit.jsonl`): timestamped JSONL of every navigation, interaction, approval decision, and profile target. Lands in Phase 1, not Phase 3 — it's nearly free and invaluable during development.
+- **Audit log** (`~/.remote-chrome/audit.jsonl` / `%LOCALAPPDATA%\remote-chrome\audit.jsonl`): timestamped JSONL of every navigation, interaction, approval decision, and profile target. Lands in Phase 1, not Phase 3 — it's nearly free and invaluable during development.
 - **Kill switch:** one MCP tool + Ctrl-C path that detaches all debugger sessions instantly (banner disappears, Claude loses control); the extension also exposes a toolbar click to sever the connection from the browser side.
 - **No cookie/credential tools.** Deliberately not exposed — Claude never reads cookie jars or stored passwords. You're simply already logged in.
 
@@ -125,7 +125,7 @@ Go single static binary per OS, no CGO, no admin rights (the extension sideloads
 
 | Concern | Debian | Windows 11 |
 |---|---|---|
-| Config/audit dir | `~/.browserd` (XDG) | `%LOCALAPPDATA%\browserd` |
+| Config/audit dir | `~/.remote-chrome` (XDG) | `%LOCALAPPDATA%\remote-chrome` |
 | Approval fallback dialog | `zenity` / terminal | PowerShell message box |
 | Loopback firewall | n/a | verify Defender allows 127.0.0.1 listener for a user binary (early smoke test) |
 

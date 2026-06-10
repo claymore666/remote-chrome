@@ -1,5 +1,5 @@
-// browserd bridge — MV3 service worker.
-// Holds a WebSocket to the local browserd server and relays:
+// remote-chrome bridge — MV3 service worker.
+// Holds a WebSocket to the local remote-chrome server and relays:
 //   - CDP commands  -> chrome.debugger.sendCommand
 //   - tab operations -> chrome.tabs / chrome.windows
 //   - CDP events    <- chrome.debugger.onEvent

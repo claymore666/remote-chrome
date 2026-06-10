@@ -28,15 +28,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"browserd/internal/audit"
-	"browserd/internal/bridge"
-	"browserd/internal/browser"
-	"browserd/internal/config"
-	"browserd/internal/server"
+	"remote-chrome/internal/audit"
+	"remote-chrome/internal/bridge"
+	"remote-chrome/internal/browser"
+	"remote-chrome/internal/config"
+	"remote-chrome/internal/server"
 )
 
 const testPage = `<!DOCTYPE html>
-<html><head><title>browserd UAT page</title></head><body>
+<html><head><title>remote-chrome UAT page</title></head><body>
 <h1>UAT fixture</h1>
 <p id="status">clicks: 0</p>
 <button id="btn" onclick="document.getElementById('status').textContent='clicks: '+(++window.__clicks||(window.__clicks=1))">Click me</button>
@@ -56,7 +56,7 @@ const testPage = `<!DOCTYPE html>
 const page2 = `<!DOCTYPE html><html><head><title>page two</title></head><body><h1>Second page</h1></body></html>`
 
 const articlePage = `<!DOCTYPE html>
-<html><head><title>The Bridge Pattern — browserd blog</title><meta name="author" content="C. Kamien"></head><body>
+<html><head><title>The Bridge Pattern — remote-chrome blog</title><meta name="author" content="C. Kamien"></head><body>
 <nav><a href="/">Home</a> <a href="/about">About</a> <a href="/archive">Archive</a> <a href="/contact">Contact</a></nav>
 <div id="cookiebanner">We use cookies to improve your experience. <button>Accept cookies</button></div>
 <article>
@@ -75,19 +75,19 @@ const articlePage = `<!DOCTYPE html>
   <p>The result is an automation path that the user can always see, always interrupt, and always audit
      after the fact, which is precisely the property a permission-gated agent needs.</p>
 </article>
-<footer>© 2026 browserd — <a href="/imprint">Imprint</a> <a href="/privacy">Privacy</a></footer>
+<footer>© 2026 remote-chrome — <a href="/imprint">Imprint</a> <a href="/privacy">Privacy</a></footer>
 </body></html>`
 
 // findChrome prefers Chrome for Testing / Chromium: Google-branded Chrome
 // ignores --load-extension since 137, so the branded binary cannot host the
 // test extension (real users sideload via chrome://extensions instead).
-// Install: npx -y @puppeteer/browsers install chrome@stable --path ~/.cache/browserd-uat
+// Install: npx -y @puppeteer/browsers install chrome@stable --path ~/.cache/remote-chrome-uat
 func findChrome() string {
 	if c := os.Getenv("CHROME_BIN"); c != "" {
 		return c
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		matches, _ := filepath.Glob(filepath.Join(home, ".cache", "browserd-uat", "chrome", "linux-*", "chrome-linux64", "chrome"))
+		matches, _ := filepath.Glob(filepath.Join(home, ".cache", "remote-chrome-uat", "chrome", "linux-*", "chrome-linux64", "chrome"))
 		if len(matches) > 0 {
 			return matches[len(matches)-1]
 		}
@@ -140,8 +140,8 @@ func buildTestExtension(t *testing.T, port int, token string) string {
 	cmd := exec.Command("node", "build.mjs")
 	cmd.Dir = extSrc
 	cmd.Env = append(os.Environ(),
-		"BROWSERD_TEST_CONFIG="+string(cfg),
-		"BROWSERD_EXT_OUTDIR="+filepath.Join(dir, "dist"),
+		"REMOTE_CHROME_TEST_CONFIG="+string(cfg),
+		"REMOTE_CHROME_EXT_OUTDIR="+filepath.Join(dir, "dist"),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("extension build failed: %v\n%s", err, out)
@@ -225,7 +225,7 @@ func startUAT(t *testing.T) *uatHarness {
 	// writing during shutdown, which makes the framework's RemoveAll race
 	// and flake with "directory not empty".
 	extDir := buildTestExtension(t, port, token)
-	profileDir, err := os.MkdirTemp("", "browserd-uat-profile-*")
+	profileDir, err := os.MkdirTemp("", "remote-chrome-uat-profile-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestUAT(t *testing.T) {
 
 	t.Run("navigate", func(t *testing.T) {
 		out := h.must(t, "navigate", map[string]any{"url": h.pageURL})
-		if !strings.Contains(out, "browserd UAT page") {
+		if !strings.Contains(out, "remote-chrome UAT page") {
 			t.Fatalf("navigate result missing title: %s", out)
 		}
 	})
@@ -415,7 +415,7 @@ func TestUAT(t *testing.T) {
 	t.Run("history", func(t *testing.T) {
 		h.must(t, "navigate", map[string]any{"url": h.pageURL + "/page2"})
 		out := h.must(t, "back", nil)
-		if !strings.Contains(out, "browserd UAT page") {
+		if !strings.Contains(out, "remote-chrome UAT page") {
 			t.Fatalf("back failed: %s", out)
 		}
 		out = h.must(t, "forward", nil)
@@ -510,21 +510,21 @@ func TestUAT(t *testing.T) {
 	})
 }
 
-// TestBinarySetup covers cmd/browserd's setup path end to end.
+// TestBinarySetup covers cmd/remote-chrome's setup path end to end.
 func TestBinarySetup(t *testing.T) {
 	root := repoRoot(t)
-	bin := filepath.Join(t.TempDir(), "browserd")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/browserd")
+	bin := filepath.Join(t.TempDir(), "remote-chrome")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/remote-chrome")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	stateDir := t.TempDir()
 	cmd := exec.Command(bin, "setup")
-	cmd.Env = append(os.Environ(), "BROWSERD_DIR="+stateDir)
+	cmd.Env = append(os.Environ(), "REMOTE_CHROME_DIR="+stateDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("browserd setup: %v\n%s", err, out)
+		t.Fatalf("remote-chrome setup: %v\n%s", err, out)
 	}
 	s := string(out)
 	for _, want := range []string{"Port", "Token", "chrome://extensions", stateDir} {

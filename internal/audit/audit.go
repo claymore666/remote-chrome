@@ -1,4 +1,4 @@
-// Package audit appends a JSONL trail of everything browserd does on the
+// Package audit appends a JSONL trail of everything remote-chrome does on the
 // user's behalf: tool calls, approval decisions, grants, connections.
 package audit
 

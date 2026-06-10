@@ -15,11 +15,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"browserd/internal/approval"
-	"browserd/internal/audit"
-	"browserd/internal/browser"
-	"browserd/internal/config"
-	"browserd/internal/perms"
+	"remote-chrome/internal/approval"
+	"remote-chrome/internal/audit"
+	"remote-chrome/internal/browser"
+	"remote-chrome/internal/config"
+	"remote-chrome/internal/perms"
 )
 
 const Version = "0.1.0"
@@ -62,7 +62,7 @@ func New(cfg *config.Config, dir string, br Bridger, mgr *browser.Manager, aud *
 		log:    log,
 	}
 	s.MCP = mcp.NewServer(&mcp.Implementation{
-		Name:    "browserd",
+		Name:    "remote-chrome",
 		Title:   "Browser control (your real Chrome, approval-gated)",
 		Version: Version,
 	}, nil)
@@ -82,7 +82,7 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) resolveProfile(ctx context.Context, session *mcp.ServerSession, requested string) (string, error) {
 	connected := s.bridge.Profiles()
 	if len(connected) == 0 {
-		return "", fmt.Errorf("no browser extension connected — is Chrome running with the browserd bridge extension configured? (run `browserd setup` for instructions)")
+		return "", fmt.Errorf("no browser extension connected — is Chrome running with the remote-chrome bridge extension configured? (run `remote-chrome setup` for instructions)")
 	}
 	def := s.cfg.DefaultProfile
 	if def == "" && len(connected) == 1 {

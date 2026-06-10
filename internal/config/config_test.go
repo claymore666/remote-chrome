@@ -9,7 +9,7 @@ import (
 )
 
 func TestFirstRunCreatesConfigWithToken(t *testing.T) {
-	t.Setenv("BROWSERD_DIR", t.TempDir())
+	t.Setenv("REMOTE_CHROME_DIR", t.TempDir())
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestFirstRunCreatesConfigWithToken(t *testing.T) {
 }
 
 func TestLoadRoundtrip(t *testing.T) {
-	t.Setenv("BROWSERD_DIR", t.TempDir())
+	t.Setenv("REMOTE_CHROME_DIR", t.TempDir())
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestTokensAreUnique(t *testing.T) {
 
 func TestDirEnvOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom")
-	t.Setenv("BROWSERD_DIR", want)
+	t.Setenv("REMOTE_CHROME_DIR", want)
 	got, err := Dir()
 	if err != nil || got != want {
 		t.Fatalf("Dir() = %q, %v", got, err)
@@ -76,7 +76,7 @@ func TestDirEnvOverride(t *testing.T) {
 
 func TestMalformedConfigIsAnError(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("BROWSERD_DIR", dir)
+	t.Setenv("REMOTE_CHROME_DIR", dir)
 	os.WriteFile(filepath.Join(dir, "config.toml"), []byte("port = \"not a number"), 0o600)
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "parse") {
