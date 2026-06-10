@@ -51,6 +51,28 @@ function setBadge(text: string, color: string) {
   chrome.action.setBadgeBackgroundColor({ color });
 }
 
+// ---- Connection state, observable by the options page ----
+
+export type ConnState = "connected" | "connecting" | "disconnected" | "unconfigured" | "killed";
+
+let connState: ConnState = "disconnected";
+let connDetail = "";
+
+function setState(state: ConnState, detail = "") {
+  connState = state;
+  connDetail = detail;
+  // Notify any open options page; rejects when nobody listens — ignore.
+  chrome.runtime
+    .sendMessage({ type: "bridge-status", state, detail })
+    .catch(() => {});
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "get-status") {
+    sendResponse({ state: connState, detail: connDetail });
+  }
+});
+
 function send(msg: Response | EventMsg | DetachedMsg | HelloMsg | object) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
@@ -62,6 +84,7 @@ async function connect() {
   const settings = await loadSettings();
   if (!settings) {
     setBadge("cfg", "#f0ad4e");
+    setState("unconfigured", "enter port and token, then save");
     scheduleReconnect();
     return;
   }
@@ -70,9 +93,11 @@ async function connect() {
   }
 
   const url = `ws://127.0.0.1:${settings.port}/ws`;
+  setState("connecting", `port ${settings.port}`);
   try {
     ws = new WebSocket(url);
   } catch (e) {
+    setState("disconnected", `cannot open ${url}`);
     scheduleReconnect();
     return;
   }
@@ -88,6 +113,7 @@ async function connect() {
     };
     ws!.send(JSON.stringify(hello));
     setBadge("on", "#5cb85c");
+    setState("connected", `port ${settings.port} as "${settings.profile}"`);
   };
 
   ws.onmessage = (ev) => {
@@ -101,8 +127,19 @@ async function connect() {
   };
 
   ws.onclose = () => {
+    const wasConnected = connState === "connected";
     ws = null;
     setBadge(killed ? "off" : "", killed ? "#d9534f" : "#777");
+    if (killed) {
+      setState("killed", "kill switch engaged — click the toolbar icon to re-arm");
+    } else if (wasConnected) {
+      setState("disconnected", "connection closed by server — check the token, then save again");
+    } else {
+      setState(
+        "disconnected",
+        `server not reachable on port ${settings.port} — is the remote-chrome server running (e.g. Claude Desktop started)?`,
+      );
+    }
     detachAll();
     scheduleReconnect();
   };
@@ -130,7 +167,7 @@ async function handleRequest(req: ServerRequest) {
     let result: any;
     switch (req.type) {
       case "cdp":
-        result = await cdpCommand(req.tabId!, req.method!, req.params);
+        result = await cdpCommand(req.tabId!, req.sessionId, req.method!, req.params);
         break;
       case "tabs":
         result = await tabsOp(req.method!, req.params || {});
@@ -152,9 +189,13 @@ async function handleRequest(req: ServerRequest) {
   }
 }
 
-async function cdpCommand(tabId: number, method: string, params: any): Promise<any> {
+async function cdpCommand(tabId: number, sessionId: string | undefined, method: string, params: any): Promise<any> {
   await ensureAttached(tabId);
-  return chrome.debugger.sendCommand({ tabId }, method, params || {});
+  // sessionId routes to an auto-attached child target (OOPIF) — flat session
+  // mode, supported by chrome.debugger since Chrome 125.
+  const target: chrome.debugger.Debuggee & { sessionId?: string } = { tabId };
+  if (sessionId) target.sessionId = sessionId;
+  return chrome.debugger.sendCommand(target, method, params || {});
 }
 
 async function ensureAttached(tabId: number) {
@@ -241,6 +282,8 @@ async function tabsOp(op: string, params: any): Promise<any> {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined) return;
   const msg: EventMsg = { type: "event", tabId: source.tabId, method, params };
+  const sessionId = (source as chrome.debugger.Debuggee & { sessionId?: string }).sessionId;
+  if (sessionId) msg.sessionId = sessionId;
   send(msg);
 });
 

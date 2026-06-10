@@ -29,11 +29,11 @@ func parseFixture(t *testing.T, s string) []axNode {
 
 func TestRenderAXTree(t *testing.T) {
 	nodes := parseFixture(t, axFixture)
-	uids := map[string]int{}
+	uids := map[string]uidRef{}
 	out := renderAXTree(nodes, uids)
 
 	// Interactive elements get uids keyed by backend node id.
-	if uids["e103"] != 103 || uids["e104"] != 104 || uids["e107"] != 107 {
+	if uids["e103"].backendID != 103 || uids["e104"].backendID != 104 || uids["e107"].backendID != 107 {
 		t.Fatalf("expected uids e103/e104/e107, got %v", uids)
 	}
 	// Non-interactive nodes must not get uids.
@@ -66,7 +66,7 @@ func TestRenderAXTree(t *testing.T) {
 
 func TestRenderAXTreeIndentation(t *testing.T) {
 	nodes := parseFixture(t, axFixture)
-	out := renderAXTree(nodes, map[string]int{})
+	out := renderAXTree(nodes, map[string]uidRef{})
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, "heading") && !strings.HasPrefix(line, "  - ") {
 			t.Errorf("child of root not indented: %q", line)
@@ -91,7 +91,7 @@ func TestRenderAXTreeTruncation(t *testing.T) {
 		root.ChildIDs = append(root.ChildIDs, n.NodeID)
 	}
 	nodes = append([]axNode{root}, nodes...)
-	out := renderAXTree(nodes, map[string]int{})
+	out := renderAXTree(nodes, map[string]uidRef{})
 	if len(out) > maxSnapshotChars+200 {
 		t.Fatalf("snapshot not truncated: %d chars", len(out))
 	}
@@ -114,15 +114,72 @@ func jsonIDNum(i int) string {
 }
 
 func TestResolveUID(t *testing.T) {
-	tab := &Tab{uids: map[string]int{}}
+	tab := &Tab{uids: map[string]uidRef{}, frames: map[string]*frameInfo{}}
 	if _, err := tab.resolveUID("e1"); err == nil || !strings.Contains(err.Error(), "snapshot") {
 		t.Fatalf("expected 'take a snapshot' error, got %v", err)
 	}
-	tab.uids["e1"] = 1
-	if id, err := tab.resolveUID("e1"); err != nil || id != 1 {
-		t.Fatalf("resolveUID = %d, %v", id, err)
+	tab.uids["e1"] = uidRef{backendID: 1}
+	if ref, err := tab.resolveUID("e1"); err != nil || ref.backendID != 1 || ref.session != "" {
+		t.Fatalf("resolveUID = %+v, %v", ref, err)
 	}
 	if _, err := tab.resolveUID("e999"); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("expected stale-uid error, got %v", err)
+	}
+	// A uid whose iframe session has detached must error as stale, never act.
+	tab.uids["f1.e5"] = uidRef{session: "sess-gone", backendID: 5}
+	if _, err := tab.resolveUID("f1.e5"); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Fatalf("expected gone-iframe error, got %v", err)
+	}
+}
+
+// TestRenderAXTreeGraftsIframe covers the OOPIF path: the child session's
+// tree renders under the owner Iframe node, child uids carry the frame
+// prefix and resolve to the child session.
+func TestRenderAXTreeGraftsIframe(t *testing.T) {
+	main := parseFixture(t, `[
+	  {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Host"},"childIds":["2","3"],"backendDOMNodeId":100},
+	  {"nodeId":"2","parentId":"1","ignored":false,"role":{"value":"Iframe"},"name":{"value":""},"childIds":["9"],"backendDOMNodeId":200},
+	  {"nodeId":"3","parentId":"1","ignored":false,"role":{"value":"button"},"name":{"value":"Host button"},"childIds":[],"backendDOMNodeId":101},
+	  {"nodeId":"9","parentId":"2","ignored":false,"role":{"value":"generic"},"name":{"value":"stub"},"childIds":[],"backendDOMNodeId":201}
+	]`)
+	child := parseFixture(t, `[
+	  {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Widget"},"childIds":["2"],"backendDOMNodeId":1},
+	  {"nodeId":"2","parentId":"1","ignored":false,"role":{"value":"button"},"name":{"value":"Pay now"},"childIds":[],"backendDOMNodeId":42}
+	]`)
+	f := &frameInfo{Session: "sessA", Parent: "", Target: "frame1", URL: "https://pay.example/checkout", Idx: 1}
+	uids := map[string]uidRef{}
+	r := &axRenderer{
+		trees: map[string][]axNode{"": main, "sessA": child},
+		graft: map[string]map[int]*frameInfo{"": {200: f}},
+		uids:  uids,
+	}
+	out := r.render()
+
+	if !strings.Contains(out, `Iframe [https://pay.example/checkout]`) {
+		t.Errorf("iframe line missing URL:\n%s", out)
+	}
+	if !strings.Contains(out, `button "Pay now" [uid=f1.e42]`) {
+		t.Errorf("child content not grafted with frame-prefixed uid:\n%s", out)
+	}
+	if uids["f1.e42"] != (uidRef{session: "sessA", backendID: 42}) {
+		t.Errorf("child uid must resolve to the child session: %+v", uids["f1.e42"])
+	}
+	if uids["e101"] != (uidRef{backendID: 101}) {
+		t.Errorf("main uid must stay session-less: %+v", uids["e101"])
+	}
+	// The parent's stub children for the iframe node must not render —
+	// the grafted tree replaces them.
+	if strings.Contains(out, "stub") {
+		t.Errorf("parent stub children rendered alongside graft:\n%s", out)
+	}
+	// Child tree nests under the iframe line: host root (0) > Iframe (1) >
+	// child RootWebArea (2) > button (3).
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, `RootWebArea "Widget"`) && !strings.HasPrefix(line, "    - ") {
+			t.Errorf("child root not indented under iframe: %q", line)
+		}
+		if strings.Contains(line, "Pay now") && !strings.HasPrefix(line, "      - ") {
+			t.Errorf("grafted node not indented under child root: %q", line)
+		}
 	}
 }

@@ -29,7 +29,7 @@ type tabKey struct {
 // Caller is the subset of bridge.Bridge the manager needs; an interface so
 // module tests can fake the extension side without a WebSocket.
 type Caller interface {
-	CDP(ctx context.Context, profile string, tabID int, method string, params any) (json.RawMessage, error)
+	CDP(ctx context.Context, profile string, tabID int, sessionID, method string, params any) (json.RawMessage, error)
 	Tabs(ctx context.Context, profile string, op string, params any) (json.RawMessage, error)
 	Detach(ctx context.Context, profile string, tabID int) error
 	Profiles() []string
@@ -49,10 +49,13 @@ type Tab struct {
 	ID      int
 
 	mu          sync.Mutex
-	enabled     map[string]bool // CDP domains we've sent <Domain>.enable for
-	uids        map[string]int  // snapshot uid -> backendDOMNodeId
+	enabled     map[string]bool   // "<sessionID>\x00<Domain>" we've sent <Domain>.enable for
+	uids        map[string]uidRef // snapshot uid -> owning session + backendDOMNodeId
 	snapshotGen int
 	loadFired   bool
+	autoAttach  bool                  // Target.setAutoAttach armed this attach lifetime
+	frames      map[string]*frameInfo // child sessionId -> out-of-process iframe target
+	frameSeq    int                   // ordinal source for uid prefixes ("f2.e17")
 
 	console  []ConsoleEntry
 	network  []*NetworkEntry
@@ -63,6 +66,24 @@ type Tab struct {
 	dialogText   string // prompt text for the next accepted prompt
 
 	lastUsed time.Time
+}
+
+// uidRef locates a snapshot element: the debugger session owning the node
+// (empty = the tab's main session) plus its backendDOMNodeId.
+type uidRef struct {
+	session   string
+	backendID int
+}
+
+// frameInfo tracks one auto-attached out-of-process iframe target.
+// Same-process iframes never appear here — they live in the main session's
+// tree like any other DOM.
+type frameInfo struct {
+	Session string // CDP session id (flat routing)
+	Parent  string // parent session id; empty = main session
+	Target  string // targetId — equals the frameId for iframe targets
+	URL     string // frame document URL (permission gating source)
+	Idx     int    // stable ordinal for uid prefixes
 }
 
 type ConsoleEntry struct {
@@ -106,7 +127,8 @@ func (m *Manager) Tab(profile string, tabID int) *Tab {
 			Profile:  profile,
 			ID:       tabID,
 			enabled:  map[string]bool{},
-			uids:     map[string]int{},
+			uids:     map[string]uidRef{},
+			frames:   map[string]*frameInfo{},
 			inflight: map[string]*NetworkEntry{},
 			lastUsed: time.Now(),
 		}
@@ -132,37 +154,71 @@ func (m *Manager) DropProfile(profile string) {
 	}
 }
 
-// CDP relays a command for a tab and refreshes its activity clock.
+// CDP relays a command on the tab's main session and refreshes its activity
+// clock.
 func (m *Manager) CDP(ctx context.Context, t *Tab, method string, params any) (json.RawMessage, error) {
+	return m.cdp(ctx, t, "", method, params)
+}
+
+// cdp relays a command on a specific session (empty = main).
+func (m *Manager) cdp(ctx context.Context, t *Tab, sessionID, method string, params any) (json.RawMessage, error) {
 	t.mu.Lock()
 	t.lastUsed = time.Now()
 	t.mu.Unlock()
-	return m.b.CDP(ctx, t.Profile, t.ID, method, params)
+	return m.b.CDP(ctx, t.Profile, t.ID, sessionID, method, params)
 }
 
-// ensureDomain sends <domain>.enable once per attach lifetime; Page is
-// required for dialog auto-handling and load events, Runtime for console,
-// Network for the request log and network-idle waits.
-func (m *Manager) ensureDomain(ctx context.Context, t *Tab, domain string) error {
+// ensureDomain sends <domain>.enable once per attach lifetime and session;
+// Page is required for dialog auto-handling and load events, Runtime for
+// console, Network for the request log and network-idle waits,
+// Accessibility for snapshots.
+func (m *Manager) ensureDomain(ctx context.Context, t *Tab, sessionID, domain string) error {
+	key := sessionID + "\x00" + domain
 	t.mu.Lock()
-	already := t.enabled[domain]
+	already := t.enabled[key]
 	t.mu.Unlock()
 	if already {
 		return nil
 	}
-	if _, err := m.CDP(ctx, t, domain+".enable", nil); err != nil {
+	if _, err := m.cdp(ctx, t, sessionID, domain+".enable", nil); err != nil {
 		return fmt.Errorf("enable %s: %w", domain, err)
 	}
 	t.mu.Lock()
-	t.enabled[domain] = true
+	t.enabled[key] = true
 	t.mu.Unlock()
 	return nil
 }
 
 // EnsurePage must precede any interaction so dialogs can never hang the
 // session (unhandled alert/confirm/beforeunload block all further CDP).
+// It also arms auto-attach so out-of-process iframes become reachable
+// child sessions before the first snapshot.
 func (m *Manager) EnsurePage(ctx context.Context, t *Tab) error {
-	return m.ensureDomain(ctx, t, "Page")
+	if err := m.ensureDomain(ctx, t, "", "Page"); err != nil {
+		return err
+	}
+	return m.ensureAutoAttach(ctx, t)
+}
+
+// ensureAutoAttach arms flat auto-attach on the main session: Chrome then
+// reports every out-of-process iframe as a child session
+// (Target.attachedToTarget). Once per attach lifetime; reset on detach.
+func (m *Manager) ensureAutoAttach(ctx context.Context, t *Tab) error {
+	t.mu.Lock()
+	already := t.autoAttach
+	t.mu.Unlock()
+	if already {
+		return nil
+	}
+	if _, err := m.cdp(ctx, t, "", "Target.setAutoAttach", map[string]any{
+		"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true,
+	}); err != nil {
+		return fmt.Errorf("auto-attach to iframe targets: %w", err)
+	}
+	t.mu.Lock()
+	t.autoAttach = true
+	t.mu.Unlock()
+	return nil
 }
 
 // HandleEvent consumes bridge events. Wired as the bridge's EventHandler;
@@ -174,6 +230,27 @@ func (m *Manager) HandleEvent(ev bridge.Event) {
 	}
 	t := m.Tab(ev.Profile, ev.TabID)
 	switch ev.Method {
+	case "Target.attachedToTarget":
+		m.handleAttachedTarget(t, ev.SessionID, ev.Params)
+		return
+	case "Target.detachedFromTarget":
+		m.handleDetachedTarget(t, ev.Params)
+		return
+	case "Target.targetInfoChanged":
+		m.handleTargetInfoChanged(t, ev.Params)
+		return
+	case "Page.javascriptDialogOpening":
+		// Dialogs are tab-modal but the event fires on the opening frame's
+		// session — the reply must go back on that same session.
+		m.handleDialog(t, ev.SessionID, ev.Params)
+		return
+	}
+	if ev.SessionID != "" {
+		// Child-session load/console/network events are not buffered (v1);
+		// the buffers describe the top-level page.
+		return
+	}
+	switch ev.Method {
 	case "Page.loadEventFired":
 		t.mu.Lock()
 		t.loadFired = true
@@ -182,8 +259,6 @@ func (m *Manager) HandleEvent(ev bridge.Event) {
 		t.mu.Lock()
 		t.loadFired = false
 		t.mu.Unlock()
-	case "Page.javascriptDialogOpening":
-		m.handleDialog(t, ev.Params)
 	case "Runtime.consoleAPICalled":
 		m.handleConsole(t, ev.Params)
 	case "Network.requestWillBeSent":
@@ -204,19 +279,110 @@ func (m *Manager) handleDetached(profile string, tabID int) {
 	if !ok {
 		return
 	}
-	// Attach state (enabled domains, snapshot uids) died with the debugger
-	// session; reset so the next use re-enables and re-snapshots.
+	// Attach state (enabled domains, snapshot uids, child sessions) died
+	// with the debugger session; reset so the next use re-arms everything.
 	t.mu.Lock()
 	t.enabled = map[string]bool{}
-	t.uids = map[string]int{}
+	t.uids = map[string]uidRef{}
+	t.frames = map[string]*frameInfo{}
+	t.autoAttach = false
 	t.inflight = map[string]*NetworkEntry{}
+	t.mu.Unlock()
+}
+
+// handleAttachedTarget registers an auto-attached OOPIF child session and
+// arms it like the main session: Page.enable so an iframe's JS dialog can
+// never hang the tab, and nested auto-attach for iframes inside iframes.
+func (m *Manager) handleAttachedTarget(t *Tab, parent string, params json.RawMessage) {
+	var p struct {
+		SessionID  string `json:"sessionId"`
+		TargetInfo struct {
+			TargetID string `json:"targetId"`
+			Type     string `json:"type"`
+			URL      string `json:"url"`
+		} `json:"targetInfo"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.SessionID == "" {
+		return
+	}
+	if p.TargetInfo.Type != "iframe" {
+		return // workers and friends are not page content
+	}
+	t.mu.Lock()
+	t.frameSeq++
+	t.frames[p.SessionID] = &frameInfo{
+		Session: p.SessionID,
+		Parent:  parent,
+		Target:  p.TargetInfo.TargetID,
+		URL:     p.TargetInfo.URL,
+		Idx:     t.frameSeq,
+	}
+	t.mu.Unlock()
+	m.log.Info("iframe target attached", "profile", t.Profile, "tab", t.ID, "url", p.TargetInfo.URL)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := m.ensureDomain(ctx, t, p.SessionID, "Page"); err != nil {
+			m.log.Warn("enable Page on iframe session", "tab", t.ID, "err", err)
+			return
+		}
+		if _, err := m.cdp(ctx, t, p.SessionID, "Target.setAutoAttach", map[string]any{
+			"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true,
+		}); err != nil {
+			m.log.Warn("auto-attach on iframe session", "tab", t.ID, "err", err)
+		}
+	}()
+}
+
+func (m *Manager) handleDetachedTarget(t *Tab, params json.RawMessage) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.SessionID == "" {
+		return
+	}
+	t.mu.Lock()
+	t.removeFrameLocked(p.SessionID)
+	t.mu.Unlock()
+}
+
+// removeFrameLocked drops a child session and any frames nested inside it
+// (their detach events may arrive on the now-dead parent session, or never).
+func (t *Tab) removeFrameLocked(sessionID string) {
+	delete(t.frames, sessionID)
+	for s, f := range t.frames {
+		if f.Parent == sessionID {
+			t.removeFrameLocked(s)
+		}
+	}
+}
+
+func (m *Manager) handleTargetInfoChanged(t *Tab, params json.RawMessage) {
+	var p struct {
+		TargetInfo struct {
+			TargetID string `json:"targetId"`
+			URL      string `json:"url"`
+		} `json:"targetInfo"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.TargetInfo.TargetID == "" {
+		return
+	}
+	t.mu.Lock()
+	for _, f := range t.frames {
+		if f.Target == p.TargetInfo.TargetID {
+			f.URL = p.TargetInfo.URL
+		}
+	}
 	t.mu.Unlock()
 }
 
 // handleDialog auto-answers JS dialogs per the tab's policy (default:
 // dismiss) and records them so Claude can see what happened. PLAN §4:
-// unhandled dialogs hang the CDP session, so this must always respond.
-func (m *Manager) handleDialog(t *Tab, params json.RawMessage) {
+// unhandled dialogs hang the CDP session, so this must always respond —
+// on the session the dialog fired on (an OOPIF's dialog must be answered
+// via the OOPIF's session).
+func (m *Manager) handleDialog(t *Tab, sessionID string, params json.RawMessage) {
 	var p struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
@@ -236,7 +402,7 @@ func (m *Manager) handleDialog(t *Tab, params json.RawMessage) {
 		if accept && text != "" {
 			args["promptText"] = text
 		}
-		if _, err := m.CDP(ctx, t, "Page.handleJavaScriptDialog", args); err != nil {
+		if _, err := m.cdp(ctx, t, sessionID, "Page.handleJavaScriptDialog", args); err != nil {
 			m.log.Warn("handle dialog failed", "profile", t.Profile, "tab", t.ID, "err", err)
 		}
 	}()

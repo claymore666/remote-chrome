@@ -168,6 +168,27 @@ func (s *Server) gateTab(ctx context.Context, req *mcp.CallToolRequest, action p
 	return profile, tabID, nil
 }
 
+// gateFrame adds the per-frame grant when uid lives inside an
+// out-of-process iframe: an embedded third-party widget (Stripe, an SSO
+// form, a consent manager) must not inherit the host page's grants. Returns
+// the frame URL ("" for main-frame elements) for audit detail. Must run
+// AFTER gateTab and BEFORE the action reaches the bridge (invariant #1).
+func (s *Server) gateFrame(ctx context.Context, req *mcp.CallToolRequest, profile string, tabID int, uid string, action perms.Action, reason string) (string, error) {
+	frameURL := s.mgr.Tab(profile, tabID).FrameURLForUID(uid)
+	if frameURL == "" {
+		return "", nil
+	}
+	domain, err := perms.DomainOf(frameURL)
+	if err != nil {
+		return "", fmt.Errorf("embedded frame has unusable URL %q: %w", frameURL, err)
+	}
+	if err := s.ensureGrant(ctx, req.Session, []perms.Action{action}, domain,
+		fmt.Sprintf("%s — inside an embedded %s frame", reason, domain)); err != nil {
+		return "", err
+	}
+	return frameURL, nil
+}
+
 // ---- grants & approval ----
 
 // ensureGrant blocks until action(s)×domain are granted, raising one human

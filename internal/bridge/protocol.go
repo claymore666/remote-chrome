@@ -8,7 +8,10 @@ import "encoding/json"
 
 // ProtocolVersion is checked against the extension's hello message; the
 // server refuses mismatched extensions.
-const ProtocolVersion = 1
+//
+// v2: sessionId on requests and events (flat routing to auto-attached
+// out-of-process iframe targets).
+const ProtocolVersion = 2
 
 // Hello is the first message an extension sends after connecting.
 type Hello struct {
@@ -21,11 +24,12 @@ type Hello struct {
 
 // Request is a server -> extension command.
 type Request struct {
-	ID     int64           `json:"id"`
-	Type   string          `json:"type"` // "cdp" | "tabs" | "detach" | "detach_all" | "ping"
-	TabID  int             `json:"tabId,omitempty"`
-	Method string          `json:"method,omitempty"`
-	Params json.RawMessage `json:"params,omitempty"`
+	ID        int64           `json:"id"`
+	Type      string          `json:"type"` // "cdp" | "tabs" | "detach" | "detach_all" | "ping"
+	TabID     int             `json:"tabId,omitempty"`
+	SessionID string          `json:"sessionId,omitempty"` // CDP child session (OOPIF); empty = the tab's main session
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
 }
 
 // inbound is any extension -> server message; fields are a union over
@@ -36,19 +40,21 @@ type inbound struct {
 	Result json.RawMessage `json:"result"`
 	Error  string          `json:"error"`
 	// event / detached / log / hello
-	Type    string          `json:"type"`
-	TabID   int             `json:"tabId"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	Reason  string          `json:"reason"`
-	Level   string          `json:"level"`
-	Message string          `json:"message"`
+	Type      string          `json:"type"`
+	TabID     int             `json:"tabId"`
+	SessionID string          `json:"sessionId"`
+	Method    string          `json:"method"`
+	Params    json.RawMessage `json:"params"`
+	Reason    string          `json:"reason"`
+	Level     string          `json:"level"`
+	Message   string          `json:"message"`
 }
 
 // Event is a CDP event (or synthetic detach notice) forwarded by an extension.
 type Event struct {
-	Profile string
-	TabID   int
-	Method  string // CDP method, or "__detached" with Params nil
-	Params  json.RawMessage
+	Profile   string
+	TabID     int
+	SessionID string // child session the event came from; empty = main session
+	Method    string // CDP method, or "__detached" with Params nil
+	Params    json.RawMessage
 }

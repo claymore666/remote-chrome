@@ -55,6 +55,24 @@ const testPage = `<!DOCTYPE html>
 
 const page2 = `<!DOCTYPE html><html><head><title>page two</title></head><body><h1>Second page</h1></body></html>`
 
+// hostPage embeds widgetPage cross-origin: the fixture site is reached as
+// 127.0.0.1, the iframe as localhost — different sites under site isolation,
+// so the iframe renders out-of-process (a separate debugger target), and
+// different registrable domains for the permission matrix. %s = widget URL.
+const hostPage = `<!DOCTYPE html>
+<html><head><title>iframe host</title></head><body>
+<h1>Host page</h1>
+<button id="hostbtn">Host button</button>
+<iframe src="%s" width="400" height="200"></iframe>
+</body></html>`
+
+const widgetPage = `<!DOCTYPE html>
+<html><head><title>embedded widget</title></head><body>
+<p id="paid">paid: no</p>
+<label>Amount <input id="amount" type="text"></label>
+<button id="paybtn" onclick="document.getElementById('paid').textContent='paid: '+document.getElementById('amount').value">Pay now</button>
+</body></html>`
+
 const articlePage = `<!DOCTYPE html>
 <html><head><title>The Bridge Pattern — remote-chrome blog</title><meta name="author" content="C. Kamien"></head><body>
 <nav><a href="/">Home</a> <a href="/about">About</a> <a href="/archive">Archive</a> <a href="/contact">Contact</a></nav>
@@ -181,6 +199,12 @@ func startUAT(t *testing.T) *uatHarness {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, testPage) })
 	mux.HandleFunc("/page2", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, page2) })
 	mux.HandleFunc("/article", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, articlePage) })
+	mux.HandleFunc("/widget", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, widgetPage) })
+	mux.HandleFunc("/iframe-host", func(w http.ResponseWriter, r *http.Request) {
+		// Same listener, different host name -> cross-origin, out-of-process.
+		_, port, _ := net.SplitHostPort(r.Host)
+		fmt.Fprintf(w, hostPage, "http://localhost:"+port+"/widget")
+	})
 	site := httptest.NewServer(mux)
 	t.Cleanup(site.Close)
 
@@ -436,6 +460,55 @@ func TestUAT(t *testing.T) {
 			t.Fatalf("list_tabs: %s", list)
 		}
 		h.must(t, "close_tab", map[string]any{"tab_id": newTab})
+	})
+
+	t.Run("oopif_iframe", func(t *testing.T) {
+		h.must(t, "navigate", map[string]any{"url": h.pageURL + "/iframe-host"})
+		// The OOPIF attaches + loads after the host page; poll the snapshot.
+		var snap string
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			snap = h.must(t, "snapshot", nil)
+			if strings.Contains(snap, "Pay now") {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if !strings.Contains(snap, `button "Pay now"`) {
+			t.Fatalf("cross-origin iframe content never appeared in snapshot:\n%s", snap)
+		}
+		if !strings.Contains(snap, "http://localhost:") {
+			t.Fatalf("iframe URL missing from snapshot:\n%s", snap)
+		}
+		payUID := uidFor(t, snap, `button "Pay now"`)
+		if !strings.HasPrefix(payUID, "f") {
+			t.Fatalf("iframe uid not frame-prefixed: %s", payUID)
+		}
+
+		// Interacting inside the frame needs a grant for the FRAME's domain
+		// (localhost), on top of the host page's (127.0.0.1).
+		before := h.approver.count.Load()
+		h.must(t, "type", map[string]any{"uid": uidFor(t, snap, `textbox "Amount"`), "text": "42"})
+		if h.approver.count.Load() <= before {
+			t.Fatal("typing into the iframe must raise a frame-domain approval")
+		}
+		h.must(t, "click", map[string]any{"uid": payUID})
+
+		// The result text lives inside the iframe — visible via snapshot
+		// (wait_for reads the main frame only).
+		deadline = time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(h.must(t, "snapshot", nil), "paid: 42") {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if fresh := h.must(t, "snapshot", nil); !strings.Contains(fresh, "paid: 42") {
+			t.Fatalf("click+type inside OOPIF had no effect:\n%s", fresh)
+		}
+		if out := h.must(t, "list_permissions", nil); !strings.Contains(out, "localhost") {
+			t.Fatalf("frame grant missing from matrix: %s", out)
+		}
 	})
 
 	t.Run("read_page_article", func(t *testing.T) {

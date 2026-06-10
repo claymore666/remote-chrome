@@ -193,7 +193,7 @@ func TestCDPCallRoundtrip(t *testing.T) {
 	fe.pump()
 	waitProfiles(t, b, 1)
 
-	raw, err := b.CDP(context.Background(), "personal", 7, "Page.navigate", map[string]any{"url": "https://example.com"})
+	raw, err := b.CDP(context.Background(), "personal", 7, "", "Page.navigate", map[string]any{"url": "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestExtensionErrorPropagates(t *testing.T) {
 	fe.pump()
 	waitProfiles(t, b, 1)
 
-	_, err := b.CDP(context.Background(), "p", 1, "Page.enable", nil)
+	_, err := b.CDP(context.Background(), "p", 1, "", "Page.enable", nil)
 	if err == nil || !contains(err.Error(), "Cannot attach") {
 		t.Fatalf("expected extension error, got %v", err)
 	}
@@ -225,14 +225,14 @@ func TestExtensionErrorPropagates(t *testing.T) {
 
 func TestUnknownProfileAndNoneConnected(t *testing.T) {
 	b, port := startBridge(t, nil)
-	if _, err := b.CDP(context.Background(), "nope", 1, "Page.enable", nil); err == nil {
+	if _, err := b.CDP(context.Background(), "nope", 1, "", "Page.enable", nil); err == nil {
 		t.Fatal("expected error with no extension connected")
 	}
 	fe, _, _ := dialExt(t, port, goodOrigin, testToken, "work", ProtocolVersion)
 	defer fe.close()
 	fe.pump()
 	waitProfiles(t, b, 1)
-	_, err := b.CDP(context.Background(), "nope", 1, "Page.enable", nil)
+	_, err := b.CDP(context.Background(), "nope", 1, "", "Page.enable", nil)
 	if err == nil || !contains(err.Error(), "work") {
 		t.Fatalf("error should name connected profiles, got %v", err)
 	}
@@ -291,7 +291,7 @@ func TestPendingCallFailsOnDisconnect(t *testing.T) {
 	}()
 	waitProfiles(t, b, 1)
 
-	_, err := b.CDP(context.Background(), "p", 1, "Page.enable", nil)
+	_, err := b.CDP(context.Background(), "p", 1, "", "Page.enable", nil)
 	if err == nil {
 		t.Fatal("expected pending call to fail when the extension dies")
 	}
@@ -338,10 +338,53 @@ func TestCallTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	_, err := b.CDP(ctx, "p", 1, "Page.enable", nil)
+	_, err := b.CDP(ctx, "p", 1, "", "Page.enable", nil)
 	if err == nil || !contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout, got %v", err)
 	}
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestSessionIDRoundtrip(t *testing.T) {
+	b, port := startBridge(t, nil)
+	fe, _, _ := dialExt(t, port, goodOrigin, testToken, "p", ProtocolVersion)
+	defer fe.close()
+	fe.handler = func(req map[string]any) (any, string) {
+		// The extension must receive the child session id on the request.
+		if req["sessionId"] != "sessA" {
+			return nil, fmt.Sprintf("sessionId not relayed: %v", req["sessionId"])
+		}
+		return map[string]any{"ok": true}, ""
+	}
+	fe.pump()
+	waitProfiles(t, b, 1)
+
+	if _, err := b.CDP(context.Background(), "p", 1, "sessA", "DOM.getBoxModel", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Main-session requests must omit the field entirely (older-shape relay).
+	fe.handler = func(req map[string]any) (any, string) {
+		if _, present := req["sessionId"]; present {
+			return nil, "sessionId must be omitted for the main session"
+		}
+		return map[string]any{}, ""
+	}
+	if _, err := b.CDP(context.Background(), "p", 1, "", "Page.enable", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Events from child sessions carry their origin.
+	got := make(chan Event, 1)
+	b.SetEventHandler(func(ev Event) { got <- ev })
+	fe.send(map[string]any{"type": "event", "tabId": 9, "sessionId": "sessA",
+		"method": "Page.javascriptDialogOpening", "params": map[string]any{}})
+	select {
+	case ev := <-got:
+		if ev.SessionID != "sessA" {
+			t.Fatalf("event session lost: %+v", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("event not dispatched")
+	}
+}

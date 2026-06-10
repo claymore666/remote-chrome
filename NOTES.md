@@ -55,6 +55,19 @@ Newest entries at the bottom of each section.
       Covered in server module tests + 3 UAT subtests (real-Chrome extraction
       incl. noise exclusion).
 
+- [x] OOPIF support (2026-06-11, issue #1): protocol v2 adds sessionId
+      routing. The server arms `Target.setAutoAttach` (flatten) in
+      EnsurePage — the extension stays a dumb relay, auto-attach is just a
+      relayed CDP command. Child sessions tracked per tab
+      (attached/detached/targetInfoChanged); snapshot fetches each frame's
+      AX tree and grafts it under the owner Iframe node with `f<n>.e<id>`
+      uids; DOM ops route to the owning session; iframe JS dialogs are
+      answered on their own session (hang prevention). Acting inside a
+      frame additionally requires a grant for the frame's own eTLD+1 — an
+      embedded widget never inherits the host page's grants. Module tests +
+      UAT `oopif_iframe` (real OOPIF: 127.0.0.1 host embeds localhost
+      widget; different sites → out of process).
+
 Remaining (post-v1, by PLAN phases): Win11 smoke test (PLAN Phase 0 calls for
 it on the real box), record mode (per-session screenshot folder), downloads,
 snapshot diffing.
@@ -95,6 +108,13 @@ server.Run(ctx, &mcp.StdioTransport{})
   with "directory not empty". The UAT harness owns that dir and removes it
   with retries after the process exits.
 
+- **OOPIF geometry is frame-local.** `DOM.getBoxModel` inside an
+  out-of-process iframe is relative to the iframe's own viewport; clicking
+  needs the owner `<iframe>`'s box (via `DOM.getFrameOwner` on the parent
+  session) added per ancestor (actions.go frameOffset — puppeteer does the
+  same). Input events go to the MAIN session regardless: the browser
+  hit-tests them into the right frame, including `Input.insertText` after a
+  child-session `DOM.focus`.
 - Chrome ≥116 keeps MV3 SW alive while WS traffic flows → server pings every 20s.
 - Unhandled JS dialogs hang the CDP session → browser manager auto-handles
   `Page.javascriptDialogOpening` (default dismiss) and surfaces it to Claude.

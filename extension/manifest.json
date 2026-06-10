@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Connects this Chrome profile to the local remote-chrome MCP server so Claude can act on your behalf, gated by your approvals.",
   "minimum_chrome_version": "116",
-  "permissions": ["debugger", "tabs", "storage"],
+  "permissions": ["debugger", "tabs", "storage", "identity", "identity.email"],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"

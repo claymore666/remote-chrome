@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"remote-chrome/internal/audit"
+	"remote-chrome/internal/bridge"
 	"remote-chrome/internal/browser"
 	"remote-chrome/internal/config"
 	"remote-chrome/internal/perms"
@@ -27,6 +28,7 @@ type fakeBrowser struct {
 	cdpCalls    []string
 	detachAll   int
 	articleMode bool // extraction script "finds" an article
+	iframeMode  bool // main AX tree contains an OOPIF; child session answers
 }
 
 func newFakeBrowser() *fakeBrowser {
@@ -58,13 +60,33 @@ const axTreeJSON = `{"nodes":[
   {"nodeId":"2","parentId":"1","ignored":false,"role":{"value":"button"},"name":{"value":"Go"},"childIds":[],"backendDOMNodeId":42}
 ]}`
 
-func (f *fakeBrowser) CDP(ctx context.Context, profile string, tabID int, method string, params any) (json.RawMessage, error) {
+const axTreeWithIframeJSON = `{"nodes":[
+  {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Example"},"childIds":["2","3"],"backendDOMNodeId":1},
+  {"nodeId":"2","parentId":"1","ignored":false,"role":{"value":"button"},"name":{"value":"Go"},"childIds":[],"backendDOMNodeId":42},
+  {"nodeId":"3","parentId":"1","ignored":false,"role":{"value":"Iframe"},"name":{"value":""},"childIds":[],"backendDOMNodeId":200}
+]}`
+
+const iframeAXJSON = `{"nodes":[
+  {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Pay"},"childIds":["2"],"backendDOMNodeId":1},
+  {"nodeId":"2","parentId":"1","ignored":false,"role":{"value":"button"},"name":{"value":"Pay now"},"childIds":[],"backendDOMNodeId":42}
+]}`
+
+func (f *fakeBrowser) CDP(ctx context.Context, profile string, tabID int, sessionID, method string, params any) (json.RawMessage, error) {
 	f.mu.Lock()
 	f.cdpCalls = append(f.cdpCalls, method)
+	iframeMode := f.iframeMode
 	f.mu.Unlock()
 	switch method {
 	case "Accessibility.getFullAXTree":
+		if sessionID != "" {
+			return json.RawMessage(iframeAXJSON), nil
+		}
+		if iframeMode {
+			return json.RawMessage(axTreeWithIframeJSON), nil
+		}
 		return json.RawMessage(axTreeJSON), nil
+	case "DOM.getFrameOwner":
+		return json.RawMessage(`{"backendNodeId":200}`), nil
 	case "Runtime.evaluate":
 		var p struct {
 			Expression string `json:"expression"`
@@ -157,6 +179,7 @@ func (e *elicitScript) handler(ctx context.Context, req *mcp.ElicitRequest) (*mc
 type harness struct {
 	srv     *Server
 	fb      *fakeBrowser
+	mgr     *browser.Manager
 	script  *elicitScript
 	session *mcp.ClientSession
 	dir     string
@@ -192,7 +215,7 @@ func newHarness(t *testing.T, mutate func(*config.Config)) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { session.Close() })
-	return &harness{srv: srv, fb: fb, script: script, session: session, dir: dir}
+	return &harness{srv: srv, fb: fb, mgr: mgr, script: script, session: session, dir: dir}
 }
 
 func (h *harness) call(t *testing.T, tool string, args map[string]any) (*mcp.CallToolResult, string) {
@@ -570,4 +593,60 @@ func TestAuditTrailWritten(t *testing.T) {
 func readFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	return string(data), err
+}
+
+// ---- per-frame gating (OOPIF; issue #1) ----
+
+// TestIframeInteractionNeedsFrameGrant: a grant for the host page must NOT
+// cover an embedded third-party frame — acting inside it raises its own
+// approval, and a denial stops the action before any input reaches Chrome.
+func TestIframeInteractionNeedsFrameGrant(t *testing.T) {
+	h := newHarness(t, nil)
+	h.fb.mu.Lock()
+	h.fb.iframeMode = true
+	h.fb.mu.Unlock()
+	// Chrome auto-attached the OOPIF (https://pay.example inside example.com).
+	h.mgr.HandleEvent(bridge.Event{Profile: "personal", TabID: 1, Method: "Target.attachedToTarget",
+		Params: json.RawMessage(`{"sessionId":"sessA","targetInfo":{"targetId":"frame1","type":"iframe","url":"https://pay.example/checkout"}}`)})
+
+	// read × example.com shows the iframe's content — perception covers
+	// what the user already sees on the page.
+	h.script.decisions = []string{"this session"}
+	res, snap := h.call(t, "snapshot", nil)
+	if res.IsError {
+		t.Fatalf("snapshot: %s", snap)
+	}
+	if !strings.Contains(snap, `button "Pay now" [uid=f1.e42]`) {
+		t.Fatalf("iframe content missing from snapshot:\n%s", snap)
+	}
+
+	// interact × example.com is granted, interact × pay.example is DENIED:
+	// the click must fail and nothing may reach the browser.
+	h.script.decisions = []string{"this session", "deny"}
+	before := h.fb.cdpCount()
+	res, txt := h.call(t, "click", map[string]any{"uid": "f1.e42"})
+	if !res.IsError {
+		t.Fatal("click inside an ungranted frame must fail")
+	}
+	if !strings.Contains(txt, "pay.example") {
+		t.Fatalf("denial must name the frame domain: %s", txt)
+	}
+	h.fb.mu.Lock()
+	calls := append([]string(nil), h.fb.cdpCalls[before:]...)
+	h.fb.mu.Unlock()
+	for _, c := range calls {
+		if strings.HasPrefix(c, "Input.") || strings.HasPrefix(c, "DOM.") {
+			t.Fatalf("denied frame click leaked %s to the browser", c)
+		}
+	}
+	if len(h.script.messages) < 3 || !strings.Contains(h.script.messages[2], "pay.example") {
+		t.Fatalf("frame approval dialog must name the frame domain: %v", h.script.messages)
+	}
+
+	// With the frame grant, the click goes through.
+	h.script.decisions = []string{"this session"}
+	res, txt = h.call(t, "click", map[string]any{"uid": "f1.e42"})
+	if res.IsError {
+		t.Fatalf("click after frame grant failed: %s", txt)
+	}
 }

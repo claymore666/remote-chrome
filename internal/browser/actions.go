@@ -21,14 +21,33 @@ func pause(minMS, maxMS int) {
 	time.Sleep(time.Duration(minMS+rand.IntN(maxMS-minMS+1)) * time.Millisecond)
 }
 
-// center locates the visual center of an element by backend node id,
-// scrolling it into view first.
-func (m *Manager) center(ctx context.Context, t *Tab, backendID int) (x, y float64, err error) {
+// center locates the visual center of an element in MAIN-viewport
+// coordinates, scrolling it into view first. For elements inside an OOPIF
+// the box model is relative to the iframe's own viewport, so the owner
+// iframe's position in each ancestor frame is added (same correction
+// puppeteer applies).
+func (m *Manager) center(ctx context.Context, t *Tab, ref uidRef) (x, y float64, err error) {
 	// Best-effort: not all nodes support scrollIntoViewIfNeeded.
-	_, _ = m.CDP(ctx, t, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": backendID})
-	raw, err := m.CDP(ctx, t, "DOM.getBoxModel", map[string]any{"backendNodeId": backendID})
+	_, _ = m.cdp(ctx, t, ref.session, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": ref.backendID})
+	q, err := m.boxContent(ctx, t, ref.session, ref.backendID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("element has no box (hidden or detached?): %w", err)
+		return 0, 0, err
+	}
+	x = (q[0] + q[2] + q[4] + q[6]) / 4
+	y = (q[1] + q[3] + q[5] + q[7]) / 4
+	offX, offY, err := m.frameOffset(ctx, t, ref.session)
+	if err != nil {
+		return 0, 0, err
+	}
+	return x + offX, y + offY, nil
+}
+
+// boxContent returns the 4-corner content quad of an element, in its own
+// session's viewport coordinates.
+func (m *Manager) boxContent(ctx context.Context, t *Tab, sessionID string, backendID int) ([]float64, error) {
+	raw, err := m.cdp(ctx, t, sessionID, "DOM.getBoxModel", map[string]any{"backendNodeId": backendID})
+	if err != nil {
+		return nil, fmt.Errorf("element has no box (hidden or detached?): %w", err)
 	}
 	var resp struct {
 		Model struct {
@@ -36,10 +55,35 @@ func (m *Manager) center(ctx context.Context, t *Tab, backendID int) (x, y float
 		} `json:"model"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil || len(resp.Model.Content) < 8 {
-		return 0, 0, fmt.Errorf("unexpected box model for node %d", backendID)
+		return nil, fmt.Errorf("unexpected box model for node %d", backendID)
 	}
-	q := resp.Model.Content
-	return (q[0] + q[2] + q[4] + q[6]) / 4, (q[1] + q[3] + q[5] + q[7]) / 4, nil
+	return resp.Model.Content, nil
+}
+
+// frameOffset accumulates the main-viewport position of a child session's
+// coordinate origin by walking owner <iframe> boxes up the ancestor chain.
+// Zero for the main session.
+func (m *Manager) frameOffset(ctx context.Context, t *Tab, sessionID string) (x, y float64, err error) {
+	for sessionID != "" {
+		t.mu.Lock()
+		f := t.frames[sessionID]
+		t.mu.Unlock()
+		if f == nil {
+			return 0, 0, fmt.Errorf("iframe session went away — call snapshot again")
+		}
+		ownerID, err := m.frameOwner(ctx, t, f.Parent, f.Target)
+		if err != nil {
+			return 0, 0, err
+		}
+		q, err := m.boxContent(ctx, t, f.Parent, ownerID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("iframe owner: %w", err)
+		}
+		x += q[0]
+		y += q[1]
+		sessionID = f.Parent
+	}
+	return x, y, nil
 }
 
 func (m *Manager) mouse(ctx context.Context, t *Tab, typ string, x, y float64, extra map[string]any) error {
@@ -51,16 +95,18 @@ func (m *Manager) mouse(ctx context.Context, t *Tab, typ string, x, y float64, e
 	return err
 }
 
-// Click moves the mouse to the element and performs a real click.
+// Click moves the mouse to the element and performs a real click. Input
+// events always go to the main session: the browser hit-tests them into the
+// right frame, OOPIF or not (this is what makes them "real").
 func (m *Manager) Click(ctx context.Context, t *Tab, uid string, doubleClick bool) error {
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return err
 	}
-	x, y, err := m.center(ctx, t, backendID)
+	x, y, err := m.center(ctx, t, ref)
 	if err != nil {
 		return err
 	}
@@ -90,11 +136,11 @@ func (m *Manager) Hover(ctx context.Context, t *Tab, uid string) error {
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return err
 	}
-	x, y, err := m.center(ctx, t, backendID)
+	x, y, err := m.center(ctx, t, ref)
 	if err != nil {
 		return err
 	}
@@ -107,11 +153,11 @@ func (m *Manager) Type(ctx context.Context, t *Tab, uid, text string, clear, pre
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return err
 	}
-	if _, err := m.CDP(ctx, t, "DOM.focus", map[string]any{"backendNodeId": backendID}); err != nil {
+	if _, err := m.cdp(ctx, t, ref.session, "DOM.focus", map[string]any{"backendNodeId": ref.backendID}); err != nil {
 		// Fall back to clicking the element to focus it.
 		if cerr := m.Click(ctx, t, uid, false); cerr != nil {
 			return fmt.Errorf("cannot focus element: %w", err)
@@ -223,11 +269,11 @@ func (m *Manager) Scroll(ctx context.Context, t *Tab, uid, direction string, amo
 		return err
 	}
 	if uid != "" {
-		backendID, err := t.resolveUID(uid)
+		ref, err := t.resolveUID(uid)
 		if err != nil {
 			return err
 		}
-		_, err = m.CDP(ctx, t, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": backendID})
+		_, err = m.cdp(ctx, t, ref.session, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": ref.backendID})
 		return err
 	}
 	if amount <= 0 {
@@ -266,8 +312,10 @@ func (m *Manager) Scroll(ctx context.Context, t *Tab, uid, direction string, amo
 
 // callOnNode runs a JS function with the element as `this`, returning the
 // JSON value. Used for select/check where real input events are impractical.
-func (m *Manager) callOnNode(ctx context.Context, t *Tab, backendID int, fn string, args ...any) (json.RawMessage, error) {
-	raw, err := m.CDP(ctx, t, "DOM.resolveNode", map[string]any{"backendNodeId": backendID})
+// Runs on the session owning the node — for OOPIF elements that is the
+// iframe's own session.
+func (m *Manager) callOnNode(ctx context.Context, t *Tab, ref uidRef, fn string, args ...any) (json.RawMessage, error) {
+	raw, err := m.cdp(ctx, t, ref.session, "DOM.resolveNode", map[string]any{"backendNodeId": ref.backendID})
 	if err != nil {
 		return nil, err
 	}
@@ -277,13 +325,13 @@ func (m *Manager) callOnNode(ctx context.Context, t *Tab, backendID int, fn stri
 		} `json:"object"`
 	}
 	if err := json.Unmarshal(raw, &resolved); err != nil || resolved.Object.ObjectID == "" {
-		return nil, fmt.Errorf("cannot resolve node %d", backendID)
+		return nil, fmt.Errorf("cannot resolve node %d", ref.backendID)
 	}
 	callArgs := make([]map[string]any, len(args))
 	for i, a := range args {
 		callArgs[i] = map[string]any{"value": a}
 	}
-	raw, err = m.CDP(ctx, t, "Runtime.callFunctionOn", map[string]any{
+	raw, err = m.cdp(ctx, t, ref.session, "Runtime.callFunctionOn", map[string]any{
 		"objectId":            resolved.Object.ObjectID,
 		"functionDeclaration": fn,
 		"arguments":           callArgs,
@@ -321,11 +369,11 @@ func (m *Manager) SelectOption(ctx context.Context, t *Tab, uid string, values [
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return "", err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return "", err
 	}
-	res, err := m.callOnNode(ctx, t, backendID, `function(values) {
+	res, err := m.callOnNode(ctx, t, ref, `function(values) {
 		const el = this.tagName === 'SELECT' ? this : this.closest('select');
 		if (!el) throw new Error('element is not a <select>');
 		const want = new Set(values);
@@ -353,11 +401,11 @@ func (m *Manager) Check(ctx context.Context, t *Tab, uid string, want bool) erro
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return err
 	}
-	res, err := m.callOnNode(ctx, t, backendID, `function() {
+	res, err := m.callOnNode(ctx, t, ref, `function() {
 		if (typeof this.checked !== 'boolean') throw new Error('element is not checkable');
 		return this.checked;
 	}`)
@@ -376,7 +424,7 @@ func (m *Manager) UploadFile(ctx context.Context, t *Tab, uid string, paths []st
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return err
 	}
-	backendID, err := t.resolveUID(uid)
+	ref, err := t.resolveUID(uid)
 	if err != nil {
 		return err
 	}
@@ -385,8 +433,8 @@ func (m *Manager) UploadFile(ctx context.Context, t *Tab, uid string, paths []st
 			return fmt.Errorf("file not found: %s", p)
 		}
 	}
-	_, err = m.CDP(ctx, t, "DOM.setFileInputFiles", map[string]any{
-		"files": paths, "backendNodeId": backendID,
+	_, err = m.cdp(ctx, t, ref.session, "DOM.setFileInputFiles", map[string]any{
+		"files": paths, "backendNodeId": ref.backendID,
 	})
 	return err
 }

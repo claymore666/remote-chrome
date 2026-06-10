@@ -12,6 +12,11 @@ import (
 // dump where every interactive element carries a stable uid that the
 // interaction tools accept. uids are valid until the next snapshot or until
 // the debugger detaches.
+//
+// Out-of-process iframes (Stripe, embedded logins, consent managers) are
+// separate debugger targets; their trees are fetched via the auto-attached
+// child sessions and grafted under their owner <iframe> node, with uids
+// prefixed per frame ("f2.e17") so interactions route to the right session.
 
 const maxSnapshotChars = 60_000
 
@@ -60,6 +65,7 @@ var structuralRoles = map[string]bool{
 	"tablist": true, "menu": true, "menubar": true, "toolbar": true,
 	"tree": true, "treeitem": true, "RootWebArea": true, "WebArea": true,
 	"group": true, "radiogroup": true, "progressbar": true, "status": true,
+	"Iframe": true, "IframePresentational": true,
 }
 
 // renderedProps are AX properties worth showing to the model.
@@ -70,27 +76,63 @@ var renderedProps = map[string]bool{
 	"valuemax": true, "level": true,
 }
 
-// Snapshot captures the page's a11y tree and registers fresh uids on t.
+// Snapshot captures the page's a11y tree (main frame + every attached
+// OOPIF) and registers fresh uids on t.
 func (m *Manager) Snapshot(ctx context.Context, t *Tab) (string, error) {
 	if err := m.EnsurePage(ctx, t); err != nil {
 		return "", err
 	}
-	if err := m.ensureDomain(ctx, t, "Accessibility"); err != nil {
-		return "", err
+
+	frames := t.frameList()
+	trees := map[string][]axNode{}
+	fetch := func(sess string) error {
+		if err := m.ensureDomain(ctx, t, sess, "Accessibility"); err != nil {
+			return err
+		}
+		raw, err := m.cdp(ctx, t, sess, "Accessibility.getFullAXTree", nil)
+		if err != nil {
+			return err
+		}
+		var resp struct {
+			Nodes []axNode `json:"nodes"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return err
+		}
+		trees[sess] = resp.Nodes
+		return nil
 	}
-	raw, err := m.CDP(ctx, t, "Accessibility.getFullAXTree", nil)
-	if err != nil {
+	if err := fetch(""); err != nil {
 		return "", fmt.Errorf("accessibility tree: %w", err)
 	}
-	var resp struct {
-		Nodes []axNode `json:"nodes"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", fmt.Errorf("parse AX tree: %w", err)
+
+	// Child frames are best-effort: one mid-navigation iframe must not kill
+	// the whole snapshot, but its absence must be visible in the output.
+	var unavailable []string
+	graft := map[string]map[int]*frameInfo{} // parent session -> owner iframe backendNodeId -> child
+	for _, f := range frames {
+		if err := fetch(f.Session); err != nil {
+			unavailable = append(unavailable, fmt.Sprintf("- Iframe [%s] (content unavailable: %s — snapshot again)", f.URL, err))
+			continue
+		}
+		ownerID, err := m.frameOwner(ctx, t, f.Parent, f.Target)
+		if err != nil {
+			delete(trees, f.Session)
+			unavailable = append(unavailable, fmt.Sprintf("- Iframe [%s] (content unavailable: %s — snapshot again)", f.URL, err))
+			continue
+		}
+		if graft[f.Parent] == nil {
+			graft[f.Parent] = map[int]*frameInfo{}
+		}
+		graft[f.Parent][ownerID] = f
 	}
 
-	uids := map[string]int{}
-	text := renderAXTree(resp.Nodes, uids)
+	uids := map[string]uidRef{}
+	r := &axRenderer{trees: trees, graft: graft, uids: uids}
+	text := r.render()
+	if len(unavailable) > 0 {
+		text += strings.Join(unavailable, "\n") + "\n"
+	}
 
 	t.mu.Lock()
 	t.uids = uids
@@ -102,37 +144,74 @@ func (m *Manager) Snapshot(ctx context.Context, t *Tab) (string, error) {
 	return header + text, nil
 }
 
-// renderAXTree turns the flat node list into an indented outline,
-// registering uids for interactive nodes.
-func renderAXTree(nodes []axNode, uids map[string]int) string {
-	byID := make(map[string]*axNode, len(nodes))
-	for i := range nodes {
-		byID[nodes[i].NodeID] = &nodes[i]
+// frameList returns the tab's attached OOPIF frames in attach order.
+func (t *Tab) frameList() []*frameInfo {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]*frameInfo, 0, len(t.frames))
+	for _, f := range t.frames {
+		out = append(out, f)
 	}
-	// Roots: nodes whose parent is absent from the dump.
-	var roots []*axNode
-	for i := range nodes {
-		n := &nodes[i]
-		if n.ParentID == "" || byID[n.ParentID] == nil {
-			roots = append(roots, n)
-		}
+	sort.Slice(out, func(i, j int) bool { return out[i].Idx < out[j].Idx })
+	return out
+}
+
+// frameOwner finds the backendNodeId of the <iframe> element hosting a
+// child frame, looked up in the parent's session (targetId == frameId for
+// iframe targets).
+func (m *Manager) frameOwner(ctx context.Context, t *Tab, parentSession, frameID string) (int, error) {
+	raw, err := m.cdp(ctx, t, parentSession, "DOM.getFrameOwner", map[string]any{"frameId": frameID})
+	if err != nil {
+		return 0, fmt.Errorf("frame owner: %w", err)
 	}
-	var sb strings.Builder
-	for _, r := range roots {
-		renderNode(&sb, byID, r, 0, uids)
-		if sb.Len() > maxSnapshotChars {
-			break
-		}
+	var resp struct {
+		BackendNodeID int `json:"backendNodeId"`
 	}
-	out := sb.String()
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.BackendNodeID == 0 {
+		return 0, fmt.Errorf("frame owner not found for frame %s", frameID)
+	}
+	return resp.BackendNodeID, nil
+}
+
+// axRenderer turns per-session flat node lists into one indented outline,
+// grafting each child frame's tree under its owner iframe node and
+// registering uids as it goes.
+type axRenderer struct {
+	trees map[string][]axNode
+	graft map[string]map[int]*frameInfo
+	uids  map[string]uidRef
+	sb    strings.Builder
+}
+
+func (r *axRenderer) render() string {
+	r.renderSession("", 0, 0)
+	out := r.sb.String()
 	if len(out) > maxSnapshotChars {
 		out = out[:maxSnapshotChars] + "\n…[snapshot truncated — use scroll + snapshot again, or query(selector)]"
 	}
 	return out
 }
 
-func renderNode(sb *strings.Builder, byID map[string]*axNode, n *axNode, depth int, uids map[string]int) {
-	if sb.Len() > maxSnapshotChars {
+func (r *axRenderer) renderSession(sess string, frameIdx, depth int) {
+	nodes := r.trees[sess]
+	byID := make(map[string]*axNode, len(nodes))
+	for i := range nodes {
+		byID[nodes[i].NodeID] = &nodes[i]
+	}
+	// Roots: nodes whose parent is absent from the dump.
+	for i := range nodes {
+		n := &nodes[i]
+		if n.ParentID == "" || byID[n.ParentID] == nil {
+			r.renderNode(byID, n, sess, frameIdx, depth)
+		}
+		if r.sb.Len() > maxSnapshotChars {
+			return
+		}
+	}
+}
+
+func (r *axRenderer) renderNode(byID map[string]*axNode, n *axNode, sess string, frameIdx, depth int) {
+	if r.sb.Len() > maxSnapshotChars {
 		return
 	}
 	role := n.Role.Value
@@ -140,33 +219,50 @@ func renderNode(sb *strings.Builder, byID map[string]*axNode, n *axNode, depth i
 	interactive := interactiveRoles[role] && n.BackendDOMNodeID != 0
 	structural := structuralRoles[role]
 	isText := role == "StaticText" || role == "text"
+	var child *frameInfo
+	if n.BackendDOMNodeID != 0 && r.graft[sess] != nil {
+		child = r.graft[sess][n.BackendDOMNodeID]
+	}
 
 	show := !n.Ignored && (interactive || (structural && (name != "" || role != "group")) || (isText && name != ""))
 	childDepth := depth
 	if show {
-		sb.WriteString(strings.Repeat("  ", depth))
-		sb.WriteString("- ")
+		r.sb.WriteString(strings.Repeat("  ", depth))
+		r.sb.WriteString("- ")
 		if isText {
-			sb.WriteString(fmt.Sprintf("text %q", truncate(name, 300)))
+			r.sb.WriteString(fmt.Sprintf("text %q", truncate(name, 300)))
 		} else {
-			sb.WriteString(role)
+			r.sb.WriteString(role)
 			if name != "" {
-				sb.WriteString(fmt.Sprintf(" %q", truncate(name, 200)))
+				r.sb.WriteString(fmt.Sprintf(" %q", truncate(name, 200)))
 			}
 		}
 		if interactive {
 			uid := fmt.Sprintf("e%d", n.BackendDOMNodeID)
-			uids[uid] = n.BackendDOMNodeID
-			sb.WriteString(" [uid=" + uid + "]")
+			if frameIdx > 0 {
+				uid = fmt.Sprintf("f%d.e%d", frameIdx, n.BackendDOMNodeID)
+			}
+			r.uids[uid] = uidRef{session: sess, backendID: n.BackendDOMNodeID}
+			r.sb.WriteString(" [uid=" + uid + "]")
+		}
+		if child != nil {
+			r.sb.WriteString(" [" + truncate(child.URL, 200) + "]")
 		}
 		if props := renderProps(n); props != "" {
-			sb.WriteString(" (" + props + ")")
+			r.sb.WriteString(" (" + props + ")")
 		}
 		if v, ok := n.Value.Value.(string); ok && v != "" {
-			sb.WriteString(fmt.Sprintf(" value=%q", truncate(v, 200)))
+			r.sb.WriteString(fmt.Sprintf(" value=%q", truncate(v, 200)))
 		}
-		sb.WriteString("\n")
+		r.sb.WriteString("\n")
 		childDepth = depth + 1
+	}
+	if child != nil {
+		// The OOPIF's content lives in its own session's tree; whatever
+		// stub children the parent tree holds for this node would
+		// duplicate it.
+		r.renderSession(child.Session, child.Idx, childDepth)
+		return
 	}
 	// StaticText children (InlineTextBox) are never useful.
 	if isText {
@@ -174,9 +270,16 @@ func renderNode(sb *strings.Builder, byID map[string]*axNode, n *axNode, depth i
 	}
 	for _, cid := range n.ChildIDs {
 		if c := byID[cid]; c != nil {
-			renderNode(sb, byID, c, childDepth, uids)
+			r.renderNode(byID, c, sess, frameIdx, childDepth)
 		}
 	}
+}
+
+// renderAXTree renders a single session's tree (no frames) — the simple
+// entry point kept for unit tests.
+func renderAXTree(nodes []axNode, uids map[string]uidRef) string {
+	r := &axRenderer{trees: map[string][]axNode{"": nodes}, uids: uids}
+	return r.render()
 }
 
 func renderProps(n *axNode) string {
@@ -199,16 +302,39 @@ func renderProps(n *axNode) string {
 	return strings.Join(parts, ", ")
 }
 
-// resolveUID maps a snapshot uid back to a backend DOM node id.
-func (t *Tab) resolveUID(uid string) (int, error) {
+// resolveUID maps a snapshot uid back to its owning session + backend DOM
+// node id.
+func (t *Tab) resolveUID(uid string) (uidRef, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	id, ok := t.uids[uid]
+	ref, ok := t.uids[uid]
 	if !ok {
 		if len(t.uids) == 0 {
-			return 0, fmt.Errorf("no snapshot taken for this tab yet (or the page changed) — call snapshot first")
+			return uidRef{}, fmt.Errorf("no snapshot taken for this tab yet (or the page changed) — call snapshot first")
 		}
-		return 0, fmt.Errorf("unknown uid %q — it may be from a stale snapshot; call snapshot again", uid)
+		return uidRef{}, fmt.Errorf("unknown uid %q — it may be from a stale snapshot; call snapshot again", uid)
 	}
-	return id, nil
+	if ref.session != "" && t.frames[ref.session] == nil {
+		return uidRef{}, fmt.Errorf("uid %q belongs to an iframe that went away (navigated or removed) — call snapshot again", uid)
+	}
+	return ref, nil
+}
+
+// FrameURLForUID reports the document URL of the out-of-process iframe
+// owning uid, or "" for main-frame elements (and unknown uids — the
+// follow-up action surfaces the proper error). The server gates frame
+// interactions on this URL's domain: an embedded third-party widget must
+// not inherit the host page's grants.
+func (t *Tab) FrameURLForUID(uid string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ref, ok := t.uids[uid]
+	if !ok || ref.session == "" {
+		return ""
+	}
+	f := t.frames[ref.session]
+	if f == nil {
+		return ""
+	}
+	return f.URL
 }

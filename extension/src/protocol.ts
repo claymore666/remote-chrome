@@ -1,7 +1,9 @@
 // Wire protocol between the remote-chrome Go server and this extension.
 // Must stay in sync with internal/bridge/protocol.go (PROTOCOL_VERSION).
 
-export const PROTOCOL_VERSION = 1;
+// v2: sessionId on requests and events (flat routing to auto-attached
+// out-of-process iframe targets).
+export const PROTOCOL_VERSION = 2;
 
 // extension -> server, first message on the socket
 export interface HelloMsg {
@@ -17,6 +19,7 @@ export interface ServerRequest {
   id: number;
   type: "cdp" | "tabs" | "detach" | "detach_all" | "ping";
   tabId?: number;
+  sessionId?: string; // CDP child session (OOPIF); absent = the tab's main session
   method?: string; // CDP method for "cdp", op name for "tabs"
   params?: any;
 }
@@ -31,6 +34,7 @@ export interface Response {
 export interface EventMsg {
   type: "event";
   tabId: number;
+  sessionId?: string; // child session the event came from; absent = main session
   method: string;
   params: any;
 }

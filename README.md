@@ -31,6 +31,10 @@ Claude *ask*, it cannot make Claude *do*.
 | `profile` | targeting a non-default Chrome profile | once |
 
 Grants are per registrable domain (`linkedin.com` covers all its subdomains).
+Cross-origin iframes (embedded logins, payment widgets, consent managers) are
+first-class: `snapshot` shows their content inline, but **acting inside one
+requires a grant for the frame's own domain** — an embedded third-party
+widget never inherits the host page's grants.
 `request_permission` lets Claude batch a task's needs into **one** dialog.
 Named permission sets (`save_permission_set` / `load_permission_set`) re-arm
 a project's matrix in a single approval. `kill_switch` (or Ctrl-C, or

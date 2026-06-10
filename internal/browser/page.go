@@ -101,7 +101,7 @@ func (m *Manager) Navigate(ctx context.Context, t *Tab, url string, timeout time
 	}
 	t.mu.Lock()
 	t.loadFired = false
-	t.uids = map[string]int{} // old uids are meaningless after navigation
+	t.uids = map[string]uidRef{} // old uids are meaningless after navigation
 	t.mu.Unlock()
 	raw, err := m.CDP(ctx, t, "Page.navigate", map[string]any{"url": url})
 	if err != nil {
@@ -176,7 +176,7 @@ func (m *Manager) History(ctx context.Context, t *Tab, delta int) error {
 	}
 	t.mu.Lock()
 	t.loadFired = false
-	t.uids = map[string]int{} // history navigation invalidates uids too
+	t.uids = map[string]uidRef{} // history navigation invalidates uids too
 	t.mu.Unlock()
 	if _, err := m.CDP(ctx, t, "Page.navigateToHistoryEntry", map[string]any{"entryId": hist.Entries[idx].ID}); err != nil {
 		return err
@@ -195,7 +195,7 @@ func (m *Manager) Reload(ctx context.Context, t *Tab, timeout time.Duration) err
 	}
 	t.mu.Lock()
 	t.loadFired = false
-	t.uids = map[string]int{}
+	t.uids = map[string]uidRef{}
 	t.mu.Unlock()
 	if _, err := m.CDP(ctx, t, "Page.reload", nil); err != nil {
 		return err
@@ -251,7 +251,7 @@ func (m *Manager) WaitFor(ctx context.Context, t *Tab, condition, value string, 
 
 // waitNetworkIdle waits until no request has been in flight for 500ms.
 func (m *Manager) waitNetworkIdle(ctx context.Context, t *Tab, timeout time.Duration) error {
-	if err := m.ensureDomain(ctx, t, "Network"); err != nil {
+	if err := m.ensureDomain(ctx, t, "", "Network"); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(timeout)
@@ -341,13 +341,15 @@ func (m *Manager) GetDOM(ctx context.Context, t *Tab, uid, selector string) (str
 		return "", err
 	}
 	params := map[string]any{}
+	sess := ""
 	switch {
 	case uid != "":
-		backendID, err := t.resolveUID(uid)
+		ref, err := t.resolveUID(uid)
 		if err != nil {
 			return "", err
 		}
-		params["backendNodeId"] = backendID
+		params["backendNodeId"] = ref.backendID
+		sess = ref.session
 	case selector != "":
 		root, err := m.CDP(ctx, t, "DOM.getDocument", map[string]any{"depth": 0})
 		if err != nil {
@@ -380,7 +382,7 @@ func (m *Manager) GetDOM(ctx context.Context, t *Tab, uid, selector string) (str
 	default:
 		return "", fmt.Errorf("pass uid or selector")
 	}
-	raw, err := m.CDP(ctx, t, "DOM.getOuterHTML", params)
+	raw, err := m.cdp(ctx, t, sess, "DOM.getOuterHTML", params)
 	if err != nil {
 		return "", err
 	}
@@ -425,15 +427,17 @@ func (m *Manager) Screenshot(ctx context.Context, t *Tab, fullPage bool, uid, fo
 		params["captureBeyondViewport"] = true
 	}
 	if uid != "" {
-		backendID, err := t.resolveUID(uid)
+		ref, err := t.resolveUID(uid)
 		if err != nil {
 			return nil, "", err
 		}
-		x, y, err := m.center(ctx, t, backendID)
+		// center is in main-viewport coordinates (frame offsets applied),
+		// which is the space Page.captureScreenshot clips in.
+		x, y, err := m.center(ctx, t, ref)
 		if err != nil {
 			return nil, "", err
 		}
-		raw, err := m.CDP(ctx, t, "DOM.getBoxModel", map[string]any{"backendNodeId": backendID})
+		raw, err := m.cdp(ctx, t, ref.session, "DOM.getBoxModel", map[string]any{"backendNodeId": ref.backendID})
 		if err != nil {
 			return nil, "", err
 		}
@@ -471,9 +475,9 @@ func (m *Manager) Screenshot(ctx context.Context, t *Tab, fullPage bool, uid, fo
 // EnableConsole/EnableNetwork start buffering; entries before enabling are
 // not captured (documented behavior).
 func (m *Manager) EnableConsole(ctx context.Context, t *Tab) error {
-	return m.ensureDomain(ctx, t, "Runtime")
+	return m.ensureDomain(ctx, t, "", "Runtime")
 }
 
 func (m *Manager) EnableNetwork(ctx context.Context, t *Tab) error {
-	return m.ensureDomain(ctx, t, "Network")
+	return m.ensureDomain(ctx, t, "", "Network")
 }

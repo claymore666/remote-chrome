@@ -24,6 +24,16 @@ func textf(format string, args ...any) *mcp.CallToolResult {
 	return text(fmt.Sprintf(format, args...))
 }
 
+// auditDetail builds the standard tool audit payload for uid-targeted
+// actions; frameURL is recorded when the element lives in an embedded frame.
+func auditDetail(tabID int, uid, frameURL string) map[string]any {
+	d := map[string]any{"tab": tabID, "uid": uid}
+	if frameURL != "" {
+		d["frame"] = frameURL
+	}
+	return d
+}
+
 func jsonResult(v any) (*mcp.CallToolResult, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -462,7 +472,11 @@ func (s *Server) registerInteraction() {
 		if err != nil {
 			return nil, nil, err
 		}
-		s.audit(audit.Entry{Kind: "tool", Tool: "click", Profile: profile, Detail: map[string]any{"tab": tabID, "uid": a.UID}})
+		frameURL, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "click an element")
+		if err != nil {
+			return nil, nil, err
+		}
+		s.audit(audit.Entry{Kind: "tool", Tool: "click", Profile: profile, Detail: auditDetail(tabID, a.UID, frameURL)})
 		if err := s.mgr.Click(ctx, s.mgr.Tab(profile, tabID), a.UID, a.Double); err != nil {
 			return nil, nil, err
 		}
@@ -483,9 +497,15 @@ func (s *Server) registerInteraction() {
 		if err != nil {
 			return nil, nil, err
 		}
+		frameURL, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "type into a field")
+		if err != nil {
+			return nil, nil, err
+		}
 		// Audit length, not content: the text may be sensitive (it is still
 		// the user's own machine, but the log should not hoard secrets).
-		s.audit(audit.Entry{Kind: "tool", Tool: "type", Profile: profile, Detail: map[string]any{"tab": tabID, "uid": a.UID, "chars": len(a.Text)}})
+		detail := auditDetail(tabID, a.UID, frameURL)
+		detail["chars"] = len(a.Text)
+		s.audit(audit.Entry{Kind: "tool", Tool: "type", Profile: profile, Detail: detail})
 		if err := s.mgr.Type(ctx, s.mgr.Tab(profile, tabID), a.UID, a.Text, a.Clear, a.PressEnter); err != nil {
 			return nil, nil, err
 		}
@@ -504,7 +524,13 @@ func (s *Server) registerInteraction() {
 		if err != nil {
 			return nil, nil, err
 		}
-		s.audit(audit.Entry{Kind: "tool", Tool: "select_option", Profile: profile, Detail: map[string]any{"tab": tabID, "uid": a.UID, "values": a.Values}})
+		frameURL, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "select a dropdown option")
+		if err != nil {
+			return nil, nil, err
+		}
+		detail := auditDetail(tabID, a.UID, frameURL)
+		detail["values"] = a.Values
+		s.audit(audit.Entry{Kind: "tool", Tool: "select_option", Profile: profile, Detail: detail})
 		selected, err := s.mgr.SelectOption(ctx, s.mgr.Tab(profile, tabID), a.UID, a.Values)
 		if err != nil {
 			return nil, nil, err
@@ -524,11 +550,17 @@ func (s *Server) registerInteraction() {
 		if err != nil {
 			return nil, nil, err
 		}
+		frameURL, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "toggle a checkbox")
+		if err != nil {
+			return nil, nil, err
+		}
 		want := true
 		if a.Checked != nil {
 			want = *a.Checked
 		}
-		s.audit(audit.Entry{Kind: "tool", Tool: "check", Profile: profile, Detail: map[string]any{"tab": tabID, "uid": a.UID, "checked": want}})
+		detail := auditDetail(tabID, a.UID, frameURL)
+		detail["checked"] = want
+		s.audit(audit.Entry{Kind: "tool", Tool: "check", Profile: profile, Detail: detail})
 		if err := s.mgr.Check(ctx, s.mgr.Tab(profile, tabID), a.UID, want); err != nil {
 			return nil, nil, err
 		}
@@ -544,6 +576,9 @@ func (s *Server) registerInteraction() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, a hoverArgs) (*mcp.CallToolResult, any, error) {
 		profile, tabID, err := s.gateTab(ctx, req, perms.Interact, a.Profile, a.TabID, "hover over an element")
 		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "hover over an element"); err != nil {
 			return nil, nil, err
 		}
 		if err := s.mgr.Hover(ctx, s.mgr.Tab(profile, tabID), a.UID); err != nil {
@@ -564,6 +599,11 @@ func (s *Server) registerInteraction() {
 		profile, tabID, err := s.gateTab(ctx, req, perms.Interact, a.Profile, a.TabID, "scroll the page")
 		if err != nil {
 			return nil, nil, err
+		}
+		if a.UID != "" {
+			if _, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Interact, "scroll an element into view"); err != nil {
+				return nil, nil, err
+			}
 		}
 		if err := s.mgr.Scroll(ctx, s.mgr.Tab(profile, tabID), a.UID, a.Direction, a.Amount); err != nil {
 			return nil, nil, err
@@ -602,7 +642,13 @@ func (s *Server) registerInteraction() {
 		if err != nil {
 			return nil, nil, err
 		}
-		s.audit(audit.Entry{Kind: "tool", Tool: "upload_file", Profile: profile, Detail: map[string]any{"tab": tabID, "paths": a.Paths}})
+		frameURL, err := s.gateFrame(ctx, req, profile, tabID, a.UID, perms.Upload, "upload files")
+		if err != nil {
+			return nil, nil, err
+		}
+		detail := auditDetail(tabID, a.UID, frameURL)
+		detail["paths"] = a.Paths
+		s.audit(audit.Entry{Kind: "tool", Tool: "upload_file", Profile: profile, Detail: detail})
 		if err := s.mgr.UploadFile(ctx, s.mgr.Tab(profile, tabID), a.UID, a.Paths); err != nil {
 			return nil, nil, err
 		}

@@ -251,9 +251,9 @@ func (b *Bridge) readLoop(pc *profileConn) {
 			}
 		case "event":
 			if b.verbose {
-				b.log.Debug("cdp event", "profile", pc.label, "tab", msg.TabID, "method", msg.Method)
+				b.log.Debug("cdp event", "profile", pc.label, "tab", msg.TabID, "session", msg.SessionID, "method", msg.Method)
 			}
-			b.dispatchEvent(Event{Profile: pc.label, TabID: msg.TabID, Method: msg.Method, Params: msg.Params})
+			b.dispatchEvent(Event{Profile: pc.label, TabID: msg.TabID, SessionID: msg.SessionID, Method: msg.Method, Params: msg.Params})
 		case "detached":
 			b.log.Info("debugger detached", "profile", pc.label, "tab", msg.TabID, "reason", msg.Reason)
 			b.dispatchEvent(Event{Profile: pc.label, TabID: msg.TabID, Method: "__detached"})
@@ -375,8 +375,10 @@ func (b *Bridge) callConn(ctx context.Context, pc *profileConn, req Request) (js
 	}
 }
 
-// CDP relays a CDP command to a tab. params may be nil.
-func (b *Bridge) CDP(ctx context.Context, profile string, tabID int, method string, params any) (json.RawMessage, error) {
+// CDP relays a CDP command to a tab. sessionID targets an auto-attached
+// child session (OOPIF); empty means the tab's main session. params may be
+// nil.
+func (b *Bridge) CDP(ctx context.Context, profile string, tabID int, sessionID, method string, params any) (json.RawMessage, error) {
 	var raw json.RawMessage
 	if params != nil {
 		data, err := json.Marshal(params)
@@ -385,7 +387,7 @@ func (b *Bridge) CDP(ctx context.Context, profile string, tabID int, method stri
 		}
 		raw = data
 	}
-	return b.Call(ctx, profile, Request{Type: "cdp", TabID: tabID, Method: method, Params: raw})
+	return b.Call(ctx, profile, Request{Type: "cdp", TabID: tabID, SessionID: sessionID, Method: method, Params: raw})
 }
 
 // Tabs relays a chrome.tabs operation.
