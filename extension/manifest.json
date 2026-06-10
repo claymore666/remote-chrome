@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "browserd bridge",
+  "version": "0.1.0",
+  "description": "Connects this Chrome profile to the local browserd MCP server so Claude can act on your behalf, gated by your approvals.",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "storage"],
+  "background": {
+    "service_worker": "dist/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "browserd: click to disconnect (kill switch)"
+  },
+  "options_page": "options.html"
+}

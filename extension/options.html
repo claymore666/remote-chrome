@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>browserd bridge — options</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    input { width: 100%; padding: 6px 8px; margin-top: 4px; box-sizing: border-box; }
+    button { margin-top: 1.5rem; padding: 8px 16px; }
+    #status { margin-left: 1rem; color: #5cb85c; }
+    .hint { color: #666; font-size: 0.85rem; font-weight: 400; }
+  </style>
+</head>
+<body>
+  <h2>browserd bridge</h2>
+  <p class="hint">Values come from the browserd server: run <code>browserd setup</code> to print port and token.</p>
+
+  <label>Server port
+    <input id="port" type="number" min="1" max="65535" placeholder="e.g. 49152">
+  </label>
+
+  <label>Token
+    <input id="token" type="password" placeholder="paste the token from browserd setup">
+  </label>
+
+  <label>Profile label
+    <span class="hint">How this Chrome profile is named when Claude targets it (e.g. personal, work).</span>
+    <input id="profile" type="text" placeholder="default">
+  </label>
+
+  <button id="save">Save &amp; reconnect</button><span id="status"></span>
+
+  <script src="dist/options.js"></script>
+</body>
+</html>
