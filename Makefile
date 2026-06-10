@@ -5,8 +5,10 @@ build: build-go build-ext
 build-go:
 	go build -o bin/remote-chrome ./cmd/remote-chrome
 
+# --include=dev: a NODE_ENV=production environment otherwise prunes
+# devDependencies and esbuild vanishes mid-build (FINDINGS.md #8).
 build-ext:
-	cd extension && npm install --no-audit --no-fund && npm run build
+	cd extension && npm install --include=dev --no-audit --no-fund && npm run build
 
 # Unit + module tests (no Chrome required).
 test:

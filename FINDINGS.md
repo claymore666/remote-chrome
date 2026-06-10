@@ -11,10 +11,15 @@ against a real Chrome profile. Code fixes below are ALREADY APPLIED and built
    `elicit()`. Claude Desktop returns `action: "accept"` with an *empty*
    `decision` field; `ParseDecision("")` failed and the code silently denied.
    Reproduced live: user clicked accept, tool got "permission denied by user".
-   Fix: empty decision on accept → `DefaultDecision()`; added `default` to the
-   elicitation schema; every approval outcome is now slog-logged.
-   **TODO for next session: unit test in `server_test.go`** (accept+empty
-   content, accept+garbage content, decline).
+   Fix: empty decision on accept → `DefaultDecision()`; every approval outcome
+   is now slog-logged. Follow-up (2026-06-11, reviewed + completed): the
+   original patch was unreachable — the schema's `required` made the SDK
+   reject content-less accepts before the server saw them, and the added
+   `default` made the SDK's ApplyDefaults panic on nil content (jsonschema-go
+   nil-map write). Both dropped from the schema; regression test
+   `TestAcceptedApprovalWithEmptyDecisionUsesDefault` covers session + once
+   defaults via content-less accepts (garbage decisions are rejected by the
+   SDK's enum validation client-side; declines were already covered).
 
 2. **Extension discarded the server's WS close reason** — the server sends
    precise close frames ("bad token", "protocol mismatch", takeover) but the
