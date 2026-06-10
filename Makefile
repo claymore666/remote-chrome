@@ -1,6 +1,7 @@
 .PHONY: build build-go build-ext test test-uat lint clean uat-chrome
 
 build: build-go build-ext
+	@echo "built wire protocol v$$(sed -n 's/^const ProtocolVersion = //p' internal/bridge/protocol.go) — restart the server AND reload the extension (chrome://extensions) so both halves match"
 
 build-go:
 	go build -o bin/remote-chrome ./cmd/remote-chrome

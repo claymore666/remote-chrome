@@ -29,6 +29,7 @@ type fakeBrowser struct {
 	detachAll   int
 	articleMode bool // extraction script "finds" an article
 	iframeMode  bool // main AX tree contains an OOPIF; child session answers
+	rejects     []bridge.Reject
 }
 
 func newFakeBrowser() *fakeBrowser {
@@ -39,6 +40,20 @@ func (f *fakeBrowser) Profiles() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.profiles...)
+}
+
+func (f *fakeBrowser) ProfileInfos() []bridge.ProfileInfo {
+	out := make([]bridge.ProfileInfo, 0)
+	for _, p := range f.Profiles() {
+		out = append(out, bridge.ProfileInfo{Profile: p, ExtensionVersion: "0.1.0-test"})
+	}
+	return out
+}
+
+func (f *fakeBrowser) RecentRejects() []bridge.Reject {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bridge.Reject(nil), f.rejects...)
 }
 
 func (f *fakeBrowser) DetachAll(ctx context.Context) {
@@ -682,5 +697,70 @@ func TestAcceptedApprovalWithEmptyDecisionUsesDefault(t *testing.T) {
 	}
 	if res, _ := h.call(t, "eval_js", map[string]any{"expression": "2"}); !res.IsError {
 		t.Fatal("once default must not persist to a second eval")
+	}
+}
+
+// ---- issue #7: request_permission from schema-mangling hosts ----
+
+func TestRequestPermissionAcceptsStringActions(t *testing.T) {
+	h := newHarness(t, nil)
+
+	// Canonical array form.
+	h.script.decisions = []string{"this session"}
+	res, txt := h.call(t, "request_permission", map[string]any{
+		"actions": []string{"read", "navigate"}, "domain": "linkedin.com", "reason": "test"})
+	if res.IsError {
+		t.Fatalf("array form failed: %s", txt)
+	}
+	if !h.srv.Matrix().Allowed(perms.Read, "linkedin.com") || !h.srv.Matrix().Allowed(perms.Navigate, "linkedin.com") {
+		t.Fatal("array form did not grant")
+	}
+
+	// String form, as produced by hosts that mangle array schemas.
+	h.script.decisions = []string{"this session"}
+	res, txt = h.call(t, "request_permission", map[string]any{
+		"actions": "interact, upload", "domain": "linkedin.com", "reason": "test"})
+	if res.IsError {
+		t.Fatalf("string form failed: %s", txt)
+	}
+	if !h.srv.Matrix().Allowed(perms.Interact, "linkedin.com") || !h.srv.Matrix().Allowed(perms.Upload, "linkedin.com") {
+		t.Fatal("string form did not grant")
+	}
+
+	// Garbage still errors actionably — through either form.
+	res, txt = h.call(t, "request_permission", map[string]any{
+		"actions": "read,frobnicate", "domain": "linkedin.com", "reason": "test"})
+	if !res.IsError || !strings.Contains(txt, "frobnicate") {
+		t.Fatalf("invalid action must error with the bad name: %v %s", res.IsError, txt)
+	}
+}
+
+// ---- issue #8: diagnostics surfaces protocol drift ----
+
+func TestDiagnosticsReportsProtocolAndRejects(t *testing.T) {
+	h := newHarness(t, nil)
+	res, txt := h.call(t, "diagnostics", nil)
+	if res.IsError {
+		t.Fatalf("diagnostics: %s", txt)
+	}
+	for _, want := range []string{
+		fmt.Sprintf(`"protocol_version": %d`, bridge.ProtocolVersion),
+		`"extension_version": "0.1.0-test"`,
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("diagnostics missing %q:\n%s", want, txt)
+		}
+	}
+	if strings.Contains(txt, "warning") {
+		t.Fatalf("no rejects -> no warning:\n%s", txt)
+	}
+
+	// With a refused handshake on record, diagnostics must explain it.
+	h.fb.mu.Lock()
+	h.fb.rejects = []bridge.Reject{{Profile: "work", Reason: "protocol mismatch (server v2, extension v1): run make build, restart server, reload extension"}}
+	h.fb.mu.Unlock()
+	_, txt = h.call(t, "diagnostics", nil)
+	if !strings.Contains(txt, "recent_rejected_connections") || !strings.Contains(txt, "protocol mismatch") || !strings.Contains(txt, "warning") {
+		t.Fatalf("diagnostics must surface refused connections:\n%s", txt)
 	}
 }

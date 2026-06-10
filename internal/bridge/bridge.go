@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,9 @@ type Bridge struct {
 	mu       sync.RWMutex
 	profiles map[string]*profileConn
 
+	rejectsMu sync.Mutex
+	rejects   []Reject // ring of recently refused connection attempts
+
 	onEvent atomic.Value // EventHandler
 	onConn  atomic.Value // ConnHook
 
@@ -58,9 +62,10 @@ type Bridge struct {
 }
 
 type profileConn struct {
-	label   string
-	ws      *websocket.Conn
-	writeMu sync.Mutex
+	label      string
+	extVersion string
+	ws         *websocket.Conn
+	writeMu    sync.Mutex
 
 	pendingMu sync.Mutex
 	pending   map[int64]chan inbound
@@ -68,6 +73,23 @@ type profileConn struct {
 
 	closed chan struct{}
 }
+
+// ProfileInfo describes one connected extension (diagnostics).
+type ProfileInfo struct {
+	Profile          string `json:"profile"`
+	ExtensionVersion string `json:"extension_version"`
+}
+
+// Reject records a refused connection attempt so diagnostics can explain a
+// missing profile (stale extension build, wrong token) instead of it just
+// being silently absent.
+type Reject struct {
+	Time    time.Time `json:"ts"`
+	Profile string    `json:"profile,omitempty"`
+	Reason  string    `json:"reason"`
+}
+
+const rejectsCap = 20
 
 func New(token string, pinnedOrigins []string, verbose bool, log *slog.Logger) *Bridge {
 	if log == nil {
@@ -143,6 +165,7 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if !b.originAllowed(origin) {
 		b.log.Warn("rejected connection: bad origin", "origin", origin, "remote", r.RemoteAddr)
+		b.recordReject("", "bad origin "+origin)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -164,17 +187,19 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	if subtle.ConstantTimeCompare([]byte(hello.Token), []byte(b.token)) != 1 {
 		b.log.Warn("rejected connection: bad token", "profile", hello.Profile)
+		b.recordReject(hello.Profile, "bad token — re-enter port + token in the extension options")
 		ws.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "bad token"), time.Now().Add(time.Second))
 		ws.Close()
 		return
 	}
 	if hello.ProtocolVersion != ProtocolVersion {
+		reason := fmt.Sprintf("protocol mismatch (server v%d, extension v%d): run make build, restart server, reload extension", ProtocolVersion, hello.ProtocolVersion)
 		b.log.Warn("rejected connection: protocol mismatch",
 			"profile", hello.Profile, "theirs", hello.ProtocolVersion, "ours", ProtocolVersion)
+		b.recordReject(hello.Profile, reason)
 		ws.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.ClosePolicyViolation,
-				fmt.Sprintf("protocol mismatch (server v%d, extension v%d): run make build, restart server, reload extension", ProtocolVersion, hello.ProtocolVersion)), time.Now().Add(time.Second))
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason), time.Now().Add(time.Second))
 		ws.Close()
 		return
 	}
@@ -184,10 +209,11 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pc := &profileConn{
-		label:   label,
-		ws:      ws,
-		pending: map[int64]chan inbound{},
-		closed:  make(chan struct{}),
+		label:      label,
+		extVersion: hello.ExtensionVersion,
+		ws:         ws,
+		pending:    map[int64]chan inbound{},
+		closed:     make(chan struct{}),
 	}
 
 	b.mu.Lock()
@@ -303,6 +329,36 @@ func (b *Bridge) Profiles() []string {
 		out = append(out, label)
 	}
 	return out
+}
+
+// ProfileInfos returns the connected profiles with their extension versions
+// (diagnostics), sorted by label.
+func (b *Bridge) ProfileInfos() []ProfileInfo {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]ProfileInfo, 0, len(b.profiles))
+	for _, pc := range b.profiles {
+		out = append(out, ProfileInfo{Profile: pc.label, ExtensionVersion: pc.extVersion})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Profile < out[j].Profile })
+	return out
+}
+
+func (b *Bridge) recordReject(profile, reason string) {
+	b.rejectsMu.Lock()
+	defer b.rejectsMu.Unlock()
+	b.rejects = append(b.rejects, Reject{Time: time.Now(), Profile: profile, Reason: reason})
+	if len(b.rejects) > rejectsCap {
+		b.rejects = b.rejects[len(b.rejects)-rejectsCap:]
+	}
+}
+
+// RecentRejects returns the most recent refused connection attempts,
+// oldest first.
+func (b *Bridge) RecentRejects() []Reject {
+	b.rejectsMu.Lock()
+	defer b.rejectsMu.Unlock()
+	return append([]Reject(nil), b.rejects...)
 }
 
 func (b *Bridge) conn(profile string) (*profileConn, error) {

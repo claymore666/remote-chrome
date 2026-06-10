@@ -388,3 +388,37 @@ func TestSessionIDRoundtrip(t *testing.T) {
 		t.Fatal("event not dispatched")
 	}
 }
+
+func TestRejectsAreRecordedForDiagnostics(t *testing.T) {
+	b, port := startBridge(t, nil)
+
+	// Protocol mismatch and bad token must land in the reject ring.
+	fe1, _, _ := dialExt(t, port, goodOrigin, testToken, "stale", ProtocolVersion+1)
+	fe1.pump()
+	fe2, _, _ := dialExt(t, port, goodOrigin, "wrong", "imposter", ProtocolVersion)
+	fe2.pump()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(b.RecentRejects()) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	rejects := b.RecentRejects()
+	if len(rejects) != 2 {
+		t.Fatalf("expected 2 recorded rejects, got %+v", rejects)
+	}
+	if rejects[0].Profile != "stale" || !contains(rejects[0].Reason, "protocol mismatch") || !contains(rejects[0].Reason, "make build") {
+		t.Fatalf("protocol reject not actionable: %+v", rejects[0])
+	}
+	if rejects[1].Profile != "imposter" || !contains(rejects[1].Reason, "token") {
+		t.Fatalf("token reject not recorded: %+v", rejects[1])
+	}
+
+	// Accepted connections expose their extension version.
+	fe3, _, _ := dialExt(t, port, goodOrigin, testToken, "p", ProtocolVersion)
+	defer fe3.close()
+	fe3.pump()
+	waitProfiles(t, b, 1)
+	infos := b.ProfileInfos()
+	if len(infos) != 1 || infos[0].Profile != "p" || infos[0].ExtensionVersion != "test" {
+		t.Fatalf("profile infos: %+v", infos)
+	}
+}

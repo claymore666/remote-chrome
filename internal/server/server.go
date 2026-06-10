@@ -17,6 +17,7 @@ import (
 
 	"remote-chrome/internal/approval"
 	"remote-chrome/internal/audit"
+	"remote-chrome/internal/bridge"
 	"remote-chrome/internal/browser"
 	"remote-chrome/internal/config"
 	"remote-chrome/internal/perms"
@@ -29,6 +30,8 @@ const Version = "0.1.0"
 // browser side entirely.
 type Bridger interface {
 	Profiles() []string
+	ProfileInfos() []bridge.ProfileInfo
+	RecentRejects() []bridge.Reject
 	DetachAll(ctx context.Context)
 }
 

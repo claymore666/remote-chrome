@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"remote-chrome/internal/approval"
 	"remote-chrome/internal/audit"
+	"remote-chrome/internal/bridge"
 	"remote-chrome/internal/perms"
 )
 
@@ -703,12 +705,30 @@ func (s *Server) registerInteraction() {
 
 func (s *Server) registerPermissions() {
 	type requestPermArgs struct {
-		Actions []string `json:"actions" jsonschema:"action groups to request: read, navigate, interact, upload, eval"`
-		Domain  string   `json:"domain" jsonschema:"registrable domain (e.g. linkedin.com) or * for anywhere"`
-		Reason  string   `json:"reason" jsonschema:"short human-readable reason shown in the approval dialog"`
+		Actions actionList `json:"actions"`
+		Domain  string     `json:"domain"`
+		Reason  string     `json:"reason"`
 	}
 	mcp.AddTool(s.MCP, &mcp.Tool{Name: "request_permission",
 		Description: "Proactively request grants for a task so the user sees ONE approval dialog instead of several (e.g. read+navigate+interact on linkedin.com before starting).",
+		// Hand-written schema: actions accepts an array OR a separated
+		// string. Some MCP hosts mangle array-typed properties and
+		// serialize the value as a string (issue #7) — with an inferred
+		// []string schema the SDK then rejects the call before the handler
+		// ever runs, making the tool unusable from those hosts.
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"actions": {
+					Types:       []string{"array", "string"},
+					Items:       &jsonschema.Schema{Type: "string"},
+					Description: "action groups to request: read, navigate, interact, upload, eval — as an array or one comma/space-separated string",
+				},
+				"domain": {Type: "string", Description: "registrable domain (e.g. linkedin.com) or * for anywhere"},
+				"reason": {Type: "string", Description: "short human-readable reason shown in the approval dialog"},
+			},
+			Required: []string{"actions", "domain", "reason"},
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, a requestPermArgs) (*mcp.CallToolResult, any, error) {
 		if len(a.Actions) == 0 {
 			return nil, nil, fmt.Errorf("actions must not be empty")
@@ -869,16 +889,46 @@ func (s *Server) registerControl() {
 	})
 
 	mcp.AddTool(s.MCP, &mcp.Tool{Name: "diagnostics",
-		Description: "Server diagnostics: connected profiles, version, state dir (free).",
+		Description: "Server diagnostics: version + protocol version, connected profiles with extension versions, recently refused connections, state dir (free).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, a struct{}) (*mcp.CallToolResult, any, error) {
-		res, err := jsonResult(map[string]any{
-			"version":   Version,
-			"profiles":  s.bridge.Profiles(),
-			"state_dir": s.dir,
-			"grants":    len(s.matrix.List()),
-		})
+		out := map[string]any{
+			"version":          Version,
+			"protocol_version": bridge.ProtocolVersion,
+			"profiles":         s.bridge.ProfileInfos(),
+			"state_dir":        s.dir,
+			"grants":           len(s.matrix.List()),
+		}
+		// A missing profile is usually a refused handshake (stale extension
+		// build after a protocol bump, wrong token) — surface why instead
+		// of leaving it silently absent (issue #8).
+		if rejects := s.bridge.RecentRejects(); len(rejects) > 0 {
+			out["recent_rejected_connections"] = rejects
+			out["warning"] = "connection attempts were refused — if a profile is missing, see recent_rejected_connections; a protocol mismatch means: make build, restart the server, reload the extension"
+		}
+		res, err := jsonResult(out)
 		return res, nil, err
 	})
+}
+
+// actionList accepts both the canonical JSON array form and one
+// comma/space/plus-separated string ("read,interact") — the form mangling
+// MCP hosts produce (issue #7).
+type actionList []string
+
+func (a *actionList) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		*a = arr
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("actions must be an array of action groups or one comma-separated string (e.g. \"read,interact\")")
+	}
+	*a = strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '+' || r == ' '
+	})
+	return nil
 }
 
 // normalizeDomain accepts "linkedin.com", "https://www.linkedin.com/x", or

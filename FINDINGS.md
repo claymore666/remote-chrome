@@ -44,6 +44,12 @@ against a real Chrome profile. Code fixes below are ALREADY APPLIED and built
 
 ## Open items (not fixed)
 
+> Update 2026-06-11: #6 and #7 fixed (GitHub issues #7/#8): `actions` now
+> accepts an array or a separated string behind a union schema; diagnostics
+> reports protocol version, extension versions and recently refused
+> connections; `make build` prints the protocol version + reload reminder;
+> #8 fixed via `npm install --include=dev`.
+
 6. **`request_permission` unusable through Cowork/Claude Desktop** — the
    server-side schema is a correct `[]string`, but the schema as seen by the
    client lost `type: array` on `actions`, so the client serializes an array

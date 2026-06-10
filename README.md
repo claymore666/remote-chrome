@@ -126,6 +126,12 @@ make lint       # gofmt, go vet, tsc --noEmit
 bin/remote-chrome --verbose   # dumps every relayed CDP command to stderr
 ```
 
+After pulling changes, run `make build` and then update **both halves**:
+restart the MCP server (new binary) and reload the unpacked extension in
+`chrome://extensions`. The server refuses extensions built for a different
+wire-protocol version; when a profile is missing, `diagnostics` lists the
+refused connection attempts with the reason.
+
 The UAT suite builds a self-configuring extension variant
 (`__TEST_CONFIG__` esbuild define), launches headless Chrome with it, and
 drives the full MCP tool surface against a local fixture page — including
