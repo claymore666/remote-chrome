@@ -173,7 +173,8 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 		b.log.Warn("rejected connection: protocol mismatch",
 			"profile", hello.Profile, "theirs", hello.ProtocolVersion, "ours", ProtocolVersion)
 		ws.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "protocol version mismatch"), time.Now().Add(time.Second))
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation,
+				fmt.Sprintf("protocol mismatch (server v%d, extension v%d): run make build, restart server, reload extension", ProtocolVersion, hello.ProtocolVersion)), time.Now().Add(time.Second))
 		ws.Close()
 		return
 	}
@@ -192,6 +193,10 @@ func (b *Bridge) handleWS(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	if old, ok := b.profiles[label]; ok {
 		// A reconnect (e.g. service worker restarted) replaces the old conn.
+		// Tell the old side why, so its status page doesn't blame the token.
+		old.ws.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation,
+				"replaced by another connection using the same profile label"), time.Now().Add(time.Second))
 		old.ws.Close()
 	}
 	b.profiles[label] = pc

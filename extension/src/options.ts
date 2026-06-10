@@ -72,11 +72,63 @@ function renderStatus(s: BridgeStatus) {
   el.style.color = color;
 }
 
+// ---- Log panel ----
+
+interface LogEntry {
+  t: number;
+  level: "info" | "warn" | "error";
+  msg: string;
+}
+
+const logEl = () => document.getElementById("log")!;
+
+function fmtEntry(e: LogEntry): HTMLElement {
+  const line = document.createElement("div");
+  line.className = e.level;
+  const ts = new Date(e.t).toLocaleTimeString(undefined, { hour12: false });
+  line.textContent = `${ts} [${e.level}] ${e.msg}`;
+  return line;
+}
+
+function appendLog(e: LogEntry) {
+  const el = logEl();
+  if (el.childElementCount === 0) el.textContent = ""; // clear placeholder text
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  el.appendChild(fmtEntry(e));
+  while (el.childElementCount > 300) el.firstElementChild!.remove();
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+async function loadLog() {
+  let entries: LogEntry[] = [];
+  try {
+    const r = await chrome.runtime.sendMessage({ type: "get-log" });
+    if (Array.isArray(r)) entries = r;
+  } catch {
+    // old worker build; panel stays empty
+  }
+  const el = logEl();
+  el.textContent = "";
+  if (entries.length === 0) {
+    el.textContent = "(no log entries yet)";
+    return;
+  }
+  for (const e of entries) el.appendChild(fmtEntry(e));
+  el.scrollTop = el.scrollHeight;
+}
+
+document.getElementById("copylog")!.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(logEl().innerText);
+});
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "bridge-status") {
     renderStatus({ state: msg.state, detail: msg.detail });
+  } else if (msg?.type === "bridge-log" && msg.entry) {
+    appendLog(msg.entry as LogEntry);
   }
 });
 
 document.getElementById("save")!.addEventListener("click", save);
 load();
+loadLog();

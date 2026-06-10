@@ -20,6 +20,7 @@ const DEBUGGER_PROTOCOL = "1.3";
 
 let ws: WebSocket | null = null;
 let reconnectDelayMs = 1000;
+let backoffResetTimer: ReturnType<typeof setTimeout> | undefined;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 let killed = false; // toolbar kill switch engaged; no auto-reconnect until re-enabled
 const attachedTabs = new Set<number>();
@@ -59,18 +60,76 @@ let connState: ConnState = "disconnected";
 let connDetail = "";
 
 function setState(state: ConnState, detail = "") {
+  const changed = state !== connState || detail !== connDetail;
   connState = state;
   connDetail = detail;
+  if (changed) {
+    log(state === "connected" ? "info" : state === "connecting" ? "info" : "warn",
+      detail ? `${state} — ${detail}` : state);
+  }
   // Notify any open options page; rejects when nobody listens — ignore.
   chrome.runtime
     .sendMessage({ type: "bridge-status", state, detail })
     .catch(() => {});
 }
 
+// ---- Ring-buffer log, viewable live from the options page ----
+// Kept in chrome.storage.session so it survives service-worker restarts
+// (MV3 workers are torn down aggressively) but not browser restarts.
+
+export interface LogEntry {
+  t: number;
+  level: "info" | "warn" | "error";
+  msg: string;
+}
+
+const LOG_CAP = 300;
+let logBuf: LogEntry[] = [];
+let logRestored: Promise<void> | null = null;
+let logPersistTimer: ReturnType<typeof setTimeout> | undefined;
+
+function restoreLog(): Promise<void> {
+  if (!logRestored) {
+    logRestored = chrome.storage.session
+      .get("log")
+      .then((s) => {
+        if (Array.isArray(s.log)) logBuf = [...s.log, ...logBuf].slice(-LOG_CAP);
+      })
+      .catch(() => {});
+  }
+  return logRestored;
+}
+
+function log(level: LogEntry["level"], msg: string) {
+  const entry: LogEntry = { t: Date.now(), level, msg };
+  logBuf.push(entry);
+  if (logBuf.length > LOG_CAP) logBuf.splice(0, logBuf.length - LOG_CAP);
+  // Also visible when inspecting the service worker console.
+  const c = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+  c(`[bridge] ${msg}`);
+  // Debounced persist; storage failures must never break the relay.
+  clearTimeout(logPersistTimer);
+  logPersistTimer = setTimeout(() => {
+    chrome.storage.session.set({ log: logBuf }).catch(() => {});
+  }, 250);
+  chrome.runtime.sendMessage({ type: "bridge-log", entry }).catch(() => {});
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "get-status") {
     sendResponse({ state: connState, detail: connDetail });
+  } else if (msg?.type === "get-log") {
+    restoreLog().then(() => sendResponse(logBuf));
+    return true; // async sendResponse
   }
+});
+
+// Surface anything otherwise silent in the worker.
+self.addEventListener("error", (ev: any) => {
+  log("error", `uncaught: ${ev?.message ?? ev}`);
+});
+self.addEventListener("unhandledrejection", (ev: any) => {
+  log("error", `unhandled rejection: ${ev?.reason?.message ?? ev?.reason ?? ev}`);
 });
 
 function send(msg: Response | EventMsg | DetachedMsg | HelloMsg | object) {
@@ -103,7 +162,14 @@ async function connect() {
   }
 
   ws.onopen = () => {
-    reconnectDelayMs = 1000;
+    // Only treat the connection as healthy (and reset backoff) once it has
+    // survived a moment — the server accepts the socket and then closes it
+    // when the hello is rejected, which must keep backing off.
+    backoffResetTimer = setTimeout(() => {
+      reconnectDelayMs = 1000;
+      setBadge("on", "#5cb85c");
+      setState("connected", `port ${settings.port} as "${settings.profile}"`);
+    }, 3000);
     const hello: HelloMsg = {
       type: "hello",
       token: settings.token,
@@ -112,11 +178,16 @@ async function connect() {
       extensionVersion: EXTENSION_VERSION,
     };
     ws!.send(JSON.stringify(hello));
-    setBadge("on", "#5cb85c");
-    setState("connected", `port ${settings.port} as "${settings.profile}"`);
+    setState("connecting", "handshake sent — waiting for the server to accept");
   };
 
   ws.onmessage = (ev) => {
+    // The server only talks to accepted connections — first message proves
+    // the hello went through.
+    if (connState !== "connected") {
+      setBadge("on", "#5cb85c");
+      setState("connected", `port ${settings.port} as "${settings.profile}"`);
+    }
     let req: ServerRequest;
     try {
       req = JSON.parse(ev.data as string);
@@ -126,14 +197,19 @@ async function connect() {
     handleRequest(req);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev: CloseEvent) => {
     const wasConnected = connState === "connected";
+    clearTimeout(backoffResetTimer);
     ws = null;
     setBadge(killed ? "off" : "", killed ? "#d9534f" : "#777");
     if (killed) {
       setState("killed", "kill switch engaged — click the toolbar icon to re-arm");
+    } else if (ev.reason) {
+      // The server says exactly why it closed (bad token, protocol
+      // mismatch, profile label takeover) — show that, never guess.
+      setState("disconnected", `server: ${ev.reason}`);
     } else if (wasConnected) {
-      setState("disconnected", "connection closed by server — check the token, then save again");
+      setState("disconnected", "connection dropped — retrying");
     } else {
       setState(
         "disconnected",
@@ -145,7 +221,8 @@ async function connect() {
   };
 
   ws.onerror = () => {
-    // onclose follows; nothing to do here
+    // onclose follows with code/reason; just note it happened
+    log("warn", "websocket error event");
   };
 }
 
@@ -185,7 +262,9 @@ async function handleRequest(req: ServerRequest) {
     }
     send({ id: req.id, result });
   } catch (e: any) {
-    send({ id: req.id, error: String(e?.message ?? e) });
+    const err = String(e?.message ?? e);
+    log("error", `${req.type}${req.method ? ` ${req.method}` : ""} (tab ${req.tabId ?? "-"}) failed: ${err}`);
+    send({ id: req.id, error: err });
   }
 }
 
@@ -289,6 +368,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined) return;
+  log("warn", `debugger detached from tab ${source.tabId}: ${reason}`);
   attachedTabs.delete(source.tabId);
   const msg: DetachedMsg = { type: "detached", tabId: source.tabId, reason };
   send(msg);
@@ -319,6 +399,7 @@ chrome.action.onClicked.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+restoreLog();
 chrome.storage.onChanged.addListener((_changes, area) => {
   if (area === "local") {
     if (ws) ws.close();

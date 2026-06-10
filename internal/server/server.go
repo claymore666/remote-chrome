@@ -275,24 +275,46 @@ func (s *Server) elicit(ctx context.Context, session *mcp.ServerSession, areq ap
 				"decision": map[string]any{
 					"type": "string",
 					"enum": []string{string(approval.Once), string(approval.Session), string(approval.Save), string(approval.Deny)},
+					// No "default" here: the SDK's ApplyDefaults panics on
+					// accepts with nil content (jsonschema-go nil-map write);
+					// the fallback below applies the suggested granularity
+					// instead.
 					"description": fmt.Sprintf("once = this call only; this session = until disconnect; save to set = persist into permission set %q; suggested: %s",
 						s.cfg.PermissionSet, areq.DefaultDecision()),
 				},
 			},
-			"required": []string{"decision"},
+			// Deliberately NOT required: some hosts (Claude Desktop) accept
+			// with empty content, and the SDK validates results against this
+			// schema before we ever see them — a required field would turn
+			// every such accept into a hard error. Absence falls back to the
+			// suggested default granularity below.
 		},
 	})
 	if err != nil {
+		s.log.Warn("approval elicitation failed", "domain", areq.Domain, "err", err)
 		return approval.Deny, fmt.Errorf("elicitation failed: %w", err)
 	}
 	if res.Action != "accept" {
+		s.log.Info("approval declined by user", "domain", areq.Domain, "action", res.Action)
 		return approval.Deny, nil
 	}
 	raw, _ := res.Content["decision"].(string)
+	if strings.TrimSpace(raw) == "" {
+		// The human accepted but the client sent no decision field (some
+		// hosts submit empty content for single-field schemas). Accept means
+		// accept: fall back to the suggested default granularity.
+		d := areq.DefaultDecision()
+		s.log.Info("approval accepted with empty decision; using default",
+			"domain", areq.Domain, "decision", d)
+		return d, nil
+	}
 	d, perr := approval.ParseDecision(raw)
 	if perr != nil {
+		s.log.Warn("approval accepted but decision unparseable — denying",
+			"domain", areq.Domain, "raw", raw)
 		return approval.Deny, nil
 	}
+	s.log.Info("approval decision", "domain", areq.Domain, "decision", d)
 	return d, nil
 }
 

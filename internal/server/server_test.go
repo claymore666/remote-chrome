@@ -173,6 +173,10 @@ func (e *elicitScript) handler(ctx context.Context, req *mcp.ElicitRequest) (*mc
 	if d == "cancel" {
 		return &mcp.ElicitResult{Action: "cancel"}, nil
 	}
+	if d == "" {
+		// Some hosts (Claude Desktop) accept without any content.
+		return &mcp.ElicitResult{Action: "accept"}, nil
+	}
 	return &mcp.ElicitResult{Action: "accept", Content: map[string]any{"decision": d}}, nil
 }
 
@@ -648,5 +652,35 @@ func TestIframeInteractionNeedsFrameGrant(t *testing.T) {
 	res, txt = h.call(t, "click", map[string]any{"uid": "f1.e42"})
 	if res.IsError {
 		t.Fatalf("click after frame grant failed: %s", txt)
+	}
+}
+
+// TestAcceptedApprovalWithEmptyDecisionUsesDefault: some MCP hosts (Claude
+// Desktop) submit empty content for single-field elicitation schemas.
+// Accept means accept — the suggested default granularity applies: session
+// for read-ish groups, once for the risky ones. Never more than suggested.
+func TestAcceptedApprovalWithEmptyDecisionUsesDefault(t *testing.T) {
+	h := newHarness(t, nil)
+
+	// read × example.com, empty decision -> session default: no re-prompt.
+	h.script.decisions = []string{""}
+	if res, txt := h.call(t, "snapshot", nil); res.IsError {
+		t.Fatalf("snapshot after empty-decision accept failed: %s", txt)
+	}
+	if res, txt := h.call(t, "snapshot", nil); res.IsError {
+		t.Fatalf("second snapshot failed: %s", txt)
+	}
+	if h.script.count != 1 {
+		t.Fatalf("session default must not re-prompt: %d elicitations", h.script.count)
+	}
+
+	// eval × example.com, empty decision -> once default: second call
+	// re-prompts (and a decline then denies).
+	h.script.decisions = []string{"", "deny"}
+	if res, txt := h.call(t, "eval_js", map[string]any{"expression": "1"}); res.IsError {
+		t.Fatalf("eval after empty-decision accept failed: %s", txt)
+	}
+	if res, _ := h.call(t, "eval_js", map[string]any{"expression": "2"}); !res.IsError {
+		t.Fatal("once default must not persist to a second eval")
 	}
 }
