@@ -52,6 +52,51 @@ function setBadge(text: string, color: string) {
   chrome.action.setBadgeBackgroundColor({ color });
 }
 
+// ---- Stale-build alert ----
+// When the server refuses the hello with a protocol mismatch, the user must
+// reload this extension (or rebuild/restart the server). Make that
+// impossible to miss: red "upd" badge, explanatory icon tooltip, one OS
+// notification. All of it clears automatically once a matching pair
+// connects.
+
+const DEFAULT_TITLE = "remote-chrome: click to disconnect (kill switch)";
+const STALE_NOTIFICATION_ID = "remote-chrome-stale-build";
+let staleAlertRaised = false;
+
+function raiseStaleAlert(reason: string) {
+  setBadge("upd", "#d9534f");
+  chrome.action.setTitle({
+    title: `remote-chrome: build mismatch — reload this extension in chrome://extensions (${reason})`,
+  });
+  if (staleAlertRaised) return; // one notification per mismatch episode
+  staleAlertRaised = true;
+  log("warn", `stale build: ${reason}`);
+  chrome.notifications.create(
+    STALE_NOTIFICATION_ID,
+    {
+      type: "basic",
+      iconUrl: "icon128.png",
+      title: "remote-chrome bridge needs a reload",
+      message: `${reason}\nReload the extension in chrome://extensions.`,
+      priority: 2,
+      requireInteraction: true,
+    },
+    () => {
+      // notifications can fail (disabled OS-side); the badge still shows
+      void chrome.runtime.lastError;
+    },
+  );
+}
+
+function clearStaleAlert() {
+  if (!staleAlertRaised) return;
+  staleAlertRaised = false;
+  chrome.action.setTitle({ title: DEFAULT_TITLE });
+  chrome.notifications.clear(STALE_NOTIFICATION_ID, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 // ---- Connection state, observable by the options page ----
 
 export type ConnState = "connected" | "connecting" | "disconnected" | "unconfigured" | "killed";
@@ -169,6 +214,7 @@ async function connect() {
       reconnectDelayMs = 1000;
       setBadge("on", "#5cb85c");
       setState("connected", `port ${settings.port} as "${settings.profile}"`);
+      clearStaleAlert();
     }, 3000);
     const hello: HelloMsg = {
       type: "hello",
@@ -187,6 +233,7 @@ async function connect() {
     if (connState !== "connected") {
       setBadge("on", "#5cb85c");
       setState("connected", `port ${settings.port} as "${settings.profile}"`);
+      clearStaleAlert();
     }
     let req: ServerRequest;
     try {
@@ -208,6 +255,9 @@ async function connect() {
       // The server says exactly why it closed (bad token, protocol
       // mismatch, profile label takeover) — show that, never guess.
       setState("disconnected", `server: ${ev.reason}`);
+      if (/protocol.*mismatch/i.test(ev.reason)) {
+        raiseStaleAlert(ev.reason);
+      }
     } else if (wasConnected) {
       setState("disconnected", "connection dropped — retrying");
     } else {

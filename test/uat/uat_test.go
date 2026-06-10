@@ -145,7 +145,7 @@ func buildTestExtension(t *testing.T, port int, token string) string {
 		t.Skip("extension/node_modules missing — run: cd extension && npm install")
 	}
 	dir := t.TempDir()
-	for _, f := range []string{"manifest.json", "options.html"} {
+	for _, f := range []string{"manifest.json", "options.html", "icon128.png"} {
 		data, err := os.ReadFile(filepath.Join(extSrc, f))
 		if err != nil {
 			t.Fatal(err)
